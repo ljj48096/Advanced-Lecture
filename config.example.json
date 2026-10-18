@@ -1,0 +1,19 @@
+{
+  "session": {
+    "pg_asp_session_id": "填写 PG.ASP.Session.ID（见 README 第1步抓取）",
+    "pg_asp_weixin_code_id": "填写 PG.ASP.WeiXinCode.ID（可为空）"
+  },
+  "authorization": "Basic cTN4YXBwbTV0eHc0MmtoejVjYzg1YWY0OmI1dTRteWVrZDVkYno0cGUxcTFoY3dnb3h4eXR0bTM3",
+  "poll_interval": 5,
+  "target_weekdays": "all",
+  "target_campus": "四平路校区",
+  "grab_prepare_lead_seconds": 180,
+  "email": {
+    "smtp_server": "smtp.163.com",
+    "smtp_port": 465,
+    "sender": "你的发件邮箱",
+    "sender_pwd": "邮箱授权码（不是登录密码）",
+    "receiver": "收件邮箱"
+  },
+  "log_path": "./monitor.log"
+}

@@ -1,0 +1,14 @@
+# ===== 敏感配置（含个人 Cookie / 邮箱授权码，切勿提交）=====
+config.json
+captured_cookie.json
+
+# ===== 运行生成 =====
+course_status.db
+monitor.log
+__pycache__/
+*.pyc
+
+# ===== 其他 =====
+.claude/
+browser_cache/
+screenshots/

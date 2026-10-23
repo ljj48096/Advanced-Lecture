@@ -149,7 +149,7 @@ iPhone：`设置 → 无线局域网 → 点电脑热点右边的 ⓘ → 配置
     "pg_asp_weixin_code_id": "第1步抓到的 PG.ASP.WeiXinCode.ID"
   },
   "authorization": "Basic ...（固定值，不用改）",
-  "poll_interval": 5,              // 轮询间隔（秒）
+  "poll_interval": 5,              // 轮询间隔（秒），实际每次会再加 1~3 秒随机抖动
   "target_weekdays": "all",        // 目标星期："all" 或 [1,3,5]（1=周一…7=周日）
   "target_campus": "四平路校区",    // 目标校区：Venue 含此关键词即匹配；留空 "" = 不限校区
   "class_level_limit": {           // 级别限抢：键=级别(校级/院级)，值=该级别最多抢几门；{} = 不限

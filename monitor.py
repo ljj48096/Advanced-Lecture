@@ -12,6 +12,7 @@
 import json
 import logging
 import os
+import random
 import sys
 import threading
 import time
@@ -275,7 +276,7 @@ def main():
         log.error("会话失效: %s", e)
         sys.exit(2)
 
-    log.info("开始监控: target_weekdays=%s, target_campus=%s, class_level_limit=%s, 轮询间隔=%ss",
+    log.info("开始监控: target_weekdays=%s, target_campus=%s, class_level_limit=%s, 轮询间隔=%ss(+随机1~3s)",
              cfg.get("target_weekdays"), cfg.get("target_campus", ""),
              cfg.get("class_level_limit"), cfg.get("poll_interval", 5))
     active = {}
@@ -291,7 +292,8 @@ def main():
             sys.exit(2)
         except Exception as e:
             log.error("本轮异常(继续下一轮): %s", e)
-        time.sleep(poll)
+        # 轮询间隔 + 随机 1~3 秒抖动，避免固定频率被识别
+        time.sleep(poll + random.randint(1, 3))
 
 
 if __name__ == "__main__":

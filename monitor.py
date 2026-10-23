@@ -350,10 +350,3 @@ def main():
             log.error("本轮异常(继续下一轮): %s", e)
         # 轮询间隔 + 随机 1~3 秒抖动，避免固定频率被识别；期间显示转圈
         spin_sleep(poll + random.randint(1, 3))
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n已退出")

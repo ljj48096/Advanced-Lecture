@@ -52,13 +52,15 @@ Authorization: Basic cTN4YXBwbTV0eHc0MmtoejVjYzg1YWY0OmI1dTRteWVrZDVkYno0cGUxcTF
 
 ```
 .
-├── monitor.py          # 主程序：轮询 → 筛选 → 邮件通知 → 自动抢课
+├── main.py             # 入口：python main.py 启动监控抢课
+├── monitor.py          # 监控主循环：轮询 → 筛选 → 邮件通知 → 自动抢课
 ├── gdjt_client.py      # API 客户端（纯标准库，含服务器校时）
 ├── db.py               # SQLite 持久化（已通知/已抢状态，重启不丢）
 ├── mailer.py           # SMTP 邮件通知
-├── selftest.py         # 链路自检（验证抢课各接口是否可用，python selftest.py）
+├── selftest.py         # 链路自检（python selftest.py）
 ├── capture_cookie.py   # mitmproxy 插件（仅抓 Cookie 时用）
-├── config.json         # 配置文件（Cookie / 星期 / 校区 / 邮箱 / 轮询间隔）
+├── config.json         # 配置文件（Cookie / 星期 / 校区 / 级别 / 邮箱，gitignored）
+├── config.example.json # 配置模板（不含真实凭据）
 ├── course_status.db    # 运行后自动生成，状态库
 ├── monitor.log         # 运行后自动生成，日志
 └── 方案.md             # 原始设计文档
@@ -184,7 +186,7 @@ python selftest.py
 
 **启动主程序**：
 ```bash
-python monitor.py
+python main.py
 ```
 
 启动后若 Cookie 有效，打印：

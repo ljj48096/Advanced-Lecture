@@ -74,6 +74,20 @@ def try_send_email(cfg, log, subject, content):
         return False
 
 
+def spin_sleep(seconds):
+    """睡眠 seconds 秒，期间在终端显示转圈动画，表示程序仍在运行。"""
+    frames = "|/-\\"
+    end = time.time() + seconds
+    i = 0
+    while time.time() < end:
+        sys.stdout.write(f"\r  监控运行中 {frames[i % 4]} ")
+        sys.stdout.flush()
+        time.sleep(0.2)
+        i += 1
+    sys.stdout.write("\r" + " " * 24 + "\r")
+    sys.stdout.flush()
+
+
 def is_weekday_match(wd, rule):
     if rule == "all":
         return True
@@ -233,7 +247,7 @@ def grab_worker(cfg, uid, log, active):
             if state == 1:
                 db.mark_grabbed(uid, title, wd, lv)
                 sign_up_time = (st.get("data") or {}).get("signUpTime", "")
-                log.info("🎉 《%s》 抢课成功!", title)
+                log.info("🎉 《%s》 抢课成功！继续监控其他符合条件课程", title)
                 try_send_email(cfg, log, f"[抢课成功] {title}",
                                f"【抢课成功】\n课程：{title}\n星期：{weekday_cn(wd)}\n"
                                f"报名时间：{sign_up_time}\n地点：{data.get('Venue')}")
@@ -292,8 +306,8 @@ def main():
             sys.exit(2)
         except Exception as e:
             log.error("本轮异常(继续下一轮): %s", e)
-        # 轮询间隔 + 随机 1~3 秒抖动，避免固定频率被识别
-        time.sleep(poll + random.randint(1, 3))
+        # 轮询间隔 + 随机 1~3 秒抖动，避免固定频率被识别；期间显示转圈
+        spin_sleep(poll + random.randint(1, 3))
 
 
 if __name__ == "__main__":

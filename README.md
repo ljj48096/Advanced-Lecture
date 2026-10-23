@@ -152,6 +152,10 @@ iPhone：`设置 → 无线局域网 → 点电脑热点右边的 ⓘ → 配置
   "poll_interval": 5,              // 轮询间隔（秒）
   "target_weekdays": "all",        // 目标星期："all" 或 [1,3,5]（1=周一…7=周日）
   "target_campus": "四平路校区",    // 目标校区：Venue 含此关键词即匹配；留空 "" = 不限校区
+  "class_level_limit": {           // 级别限抢：键=级别(校级/院级)，值=该级别最多抢几门；{} = 不限
+    "校级": 2,
+    "院级": 5
+  },
   "grab_prepare_lead_seconds": 180, // 提前多少秒进入抢课准备（默认 180 = 3 分钟）
   "email": {
     "smtp_server": "smtp.163.com",  // 163 邮箱；QQ 用 smtp.qq.com
@@ -207,6 +211,7 @@ python monitor.py
 | `Capacity` | 容量 |
 | `SignupNum` | 已报名人数，**剩余名额 = Capacity - SignupNum** |
 | `LectureHallStatus` | 状态：1=有余位 2=已报满 3=未开启 4=已结束 |
+| `ClassLevel` / `ClassLevelName` | 级别：`校级` / `院级`（用于级别限抢） |
 
 ### 抢课流程（每门课）
 
@@ -237,6 +242,7 @@ python monitor.py
 
 - 只想抢某几天的课：`"target_weekdays": [2,4,5]`（周二四、五）。
 - 只想抢某校区：`"target_campus": "四平路校区"`；不限校区：`"target_campus": ""`。
+- 想按级别限抢：`"class_level_limit": {"校级": 2, "院级": 5}`（校级最多抢 2 门、院级最多抢 5 门）；`{}` = 不限级别不限数量。
 
 ### 关于「校区」匹配的说明
 

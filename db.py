@@ -15,12 +15,17 @@ def init_db():
             course_uid  TEXT PRIMARY KEY,
             course_name TEXT,
             weekday     INTEGER,
+            class_level TEXT,
             notified    INTEGER DEFAULT 0,
             grabbed     INTEGER DEFAULT 0,
             notify_time TEXT,
             grab_time   TEXT
         )
     """)
+    # 兼容旧库：补充 class_level 列
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(course_record)").fetchall()]
+    if "class_level" not in cols:
+        conn.execute("ALTER TABLE course_record ADD COLUMN class_level TEXT")
     conn.commit()
     conn.close()
 
@@ -32,13 +37,13 @@ def is_notified(uid):
     return bool(row and row[0])
 
 
-def mark_notified(uid, name, weekday):
+def mark_notified(uid, name, weekday, class_level=""):
     conn = _conn()
     conn.execute("""
-        INSERT INTO course_record (course_uid, course_name, weekday, notified, notify_time)
-        VALUES (?,?,?,1,datetime('now','localtime'))
+        INSERT INTO course_record (course_uid, course_name, weekday, class_level, notified, notify_time)
+        VALUES (?,?,?,?,1,datetime('now','localtime'))
         ON CONFLICT(course_uid) DO UPDATE SET notified=1, notify_time=datetime('now','localtime')
-    """, (uid, name, weekday))
+    """, (uid, name, weekday, class_level))
     conn.commit()
     conn.close()
 
@@ -50,13 +55,13 @@ def is_grabbed(uid):
     return bool(row and row[0])
 
 
-def mark_grabbed(uid, name, weekday):
+def mark_grabbed(uid, name, weekday, class_level=""):
     conn = _conn()
     conn.execute("""
-        INSERT INTO course_record (course_uid, course_name, weekday, grabbed, grab_time)
-        VALUES (?,?,?,1,datetime('now','localtime'))
+        INSERT INTO course_record (course_uid, course_name, weekday, class_level, grabbed, grab_time)
+        VALUES (?,?,?,?,1,datetime('now','localtime'))
         ON CONFLICT(course_uid) DO UPDATE SET grabbed=1, grab_time=datetime('now','localtime')
-    """, (uid, name, weekday))
+    """, (uid, name, weekday, class_level))
     conn.commit()
     conn.close()
 
@@ -69,12 +74,21 @@ def is_failed(uid):
     return bool(row and row[0] == -1)
 
 
-def mark_failed(uid, name, weekday):
+def mark_failed(uid, name, weekday, class_level=""):
     conn = _conn()
     conn.execute("""
-        INSERT INTO course_record (course_uid, course_name, weekday, grabbed, grab_time)
-        VALUES (?,?,?,-1,datetime('now','localtime'))
+        INSERT INTO course_record (course_uid, course_name, weekday, class_level, grabbed, grab_time)
+        VALUES (?,?,?,?,-1,datetime('now','localtime'))
         ON CONFLICT(course_uid) DO UPDATE SET grabbed=-1, grab_time=datetime('now','localtime')
-    """, (uid, name, weekday))
+    """, (uid, name, weekday, class_level))
     conn.commit()
     conn.close()
+
+
+def count_grabbed_by_level(level):
+    """某级别已抢到（grabbed=1）的课程数。"""
+    conn = _conn()
+    row = conn.execute(
+        "SELECT COUNT(*) FROM course_record WHERE class_level=? AND grabbed=1", (level,)).fetchone()
+    conn.close()
+    return row[0] if row else 0

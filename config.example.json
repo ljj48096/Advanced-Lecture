@@ -7,6 +7,10 @@
   "poll_interval": 5,
   "target_weekdays": "all",
   "target_campus": "四平路校区",
+  "class_level_limit": {
+    "校级": 2,
+    "院级": 5
+  },
   "grab_prepare_lead_seconds": 180,
   "email": {
     "smtp_server": "smtp.163.com",

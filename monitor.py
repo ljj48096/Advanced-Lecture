@@ -84,9 +84,10 @@ def parse_server_time(s):
 
 
 def fetch_matching(cfg, client):
-    """拉取【星期匹配 + 校区匹配 + 未报满】的课程（status=1有余位 + 3未开启报名）。"""
+    """拉取【星期匹配 + 校区匹配 + 级别匹配 + 未报满】的课程（status=1有余位 + 3未开启报名）。"""
     rule = cfg.get("target_weekdays", "all")
     campus = cfg.get("target_campus", "")
+    level_limit = cfg.get("class_level_limit") or {}
     result = {}
     for status in (1, 3):
         page = 1
@@ -101,6 +102,8 @@ def fetch_matching(cfg, client):
                     continue
                 if campus and campus not in (r.get("Venue") or ""):
                     continue
+                if level_limit and (r.get("ClassLevelName") or "") not in level_limit:
+                    continue
                 result[r["DataId"]] = r
             if len(rows) < 50:
                 break
@@ -114,7 +117,9 @@ def notify_and_grab(cfg, client, lec, log, active):
     wd = safe_weekday(lec.get("LectureTimeStart", ""))
     if not wd:
         return
+    lv = lec.get("ClassLevelName") or ""
     remain = int(lec.get("Capacity") or 0) - int(lec.get("SignupNum") or 0)
+    level_limit = cfg.get("class_level_limit") or {}
 
     if db.is_grabbed(uid) or db.is_failed(uid):
         return
@@ -134,11 +139,14 @@ def notify_and_grab(cfg, client, lec, log, active):
                    f"报名开放时间：{lec.get('TimeSigningUp')}\n"
                    f"地点：{lec.get('Venue')}")
         if try_send_email(cfg, log, subject, content):
-            db.mark_notified(uid, name, wd)
+            db.mark_notified(uid, name, wd, lv)
             log.info("已发送邮件通知: 《%s》 剩余 %d", name, remain)
 
     # 自动抢课：到达开放时间前后 lead 秒内启动抢课线程
     if remain <= 0:
+        return
+    # 级别限抢数量：该级别已抢满则跳过
+    if level_limit and lv in level_limit and db.count_grabbed_by_level(lv) >= level_limit[lv]:
         return
     try:
         open_ts = parse_server_time(lec.get("TimeSigningUp", ""))
@@ -162,6 +170,7 @@ def grab_worker(cfg, uid, log, active):
         data = det["data"]
         title = data.get("Cathedra", uid)
         wd = safe_weekday(data.get("LectureTimeStart", ""))
+        lv = data.get("ClassLevelName") or ""
         if data.get("XSSigningUp"):
             log.info("《%s》 已报名过", title)
             db.mark_grabbed(uid, title, wd)
@@ -208,7 +217,7 @@ def grab_worker(cfg, uid, log, active):
                 raise SessionExpired(msg)
             if any(k in msg for k in TERMINAL_KEYWORDS):
                 log.info("《%s》 报名失败(终态): %s", title, msg)
-                db.mark_failed(uid, title, wd)
+                db.mark_failed(uid, title, wd, lv)
                 try_send_email(cfg, log, f"[抢课失败] {title}",
                                f"【抢课失败】\n课程：{title}\n星期：{weekday_cn(wd)}\n原因：{msg}")
                 return
@@ -221,7 +230,7 @@ def grab_worker(cfg, uid, log, active):
             st = client.get_signin_time(uid)
             state = (st.get("data") or {}).get("state")
             if state == 1:
-                db.mark_grabbed(uid, title, wd)
+                db.mark_grabbed(uid, title, wd, lv)
                 sign_up_time = (st.get("data") or {}).get("signUpTime", "")
                 log.info("🎉 《%s》 抢课成功!", title)
                 try_send_email(cfg, log, f"[抢课成功] {title}",
@@ -230,7 +239,7 @@ def grab_worker(cfg, uid, log, active):
                 return
             if state == -1:
                 log.info("《%s》 服务端确认失败", title)
-                db.mark_failed(uid, title, wd)
+                db.mark_failed(uid, title, wd, lv)
                 try_send_email(cfg, log, f"[抢课失败] {title}",
                                f"【抢课失败】\n课程：{title}\n星期：{weekday_cn(wd)}\n"
                                f"原因：服务端确认报名失败")
@@ -266,8 +275,9 @@ def main():
         log.error("会话失效: %s", e)
         sys.exit(2)
 
-    log.info("开始监控: target_weekdays=%s, target_campus=%s, 轮询间隔=%ss",
-             cfg.get("target_weekdays"), cfg.get("target_campus", ""), cfg.get("poll_interval", 5))
+    log.info("开始监控: target_weekdays=%s, target_campus=%s, class_level_limit=%s, 轮询间隔=%ss",
+             cfg.get("target_weekdays"), cfg.get("target_campus", ""),
+             cfg.get("class_level_limit"), cfg.get("poll_interval", 5))
     active = {}
     poll = cfg.get("poll_interval", 5)
     while True:

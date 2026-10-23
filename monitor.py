@@ -88,6 +88,15 @@ def spin_sleep(seconds):
     sys.stdout.flush()
 
 
+def warn_banner(log, title, lines):
+    """打印醒目的多行警告横幅。"""
+    log.warning("!" * 60)
+    log.warning("!! %s", title)
+    for ln in lines:
+        log.warning("!! %s", ln)
+    log.warning("!" * 60)
+
+
 def is_weekday_match(wd, rule):
     if rule == "all":
         return True
@@ -102,7 +111,7 @@ def fetch_matching(cfg, client):
     """拉取【星期匹配 + 校区匹配 + 级别匹配 + 未报满】的课程，并返回各状态课程总数。
 
     返回 (匹配课程列表, {状态码: 总数})。
-    状态码: 1=有余位 2=已报满 3=未开启报名 4=已结束。
+    状态码: 1=有余位 2=已报满 3=未开启报名。
     """
     rule = cfg.get("target_weekdays", "all")
     campus = cfg.get("target_campus", "")
@@ -132,10 +141,9 @@ def fetch_matching(cfg, client):
                 break
             page += 1
 
-    # 已报满(2) + 已结束(4)：只取总数，不翻页
-    for status in (2, 4):
-        d = client.get_lecture_list(page=1, page_size=1, status=status)
-        counts[status] = (d.get("data") or {}).get("totalcount", 0)
+    # 已报满(2)：只取总数，不翻页
+    d = client.get_lecture_list(page=1, page_size=1, status=2)
+    counts[2] = (d.get("data") or {}).get("totalcount", 0)
 
     return list(result.values()), counts
 
@@ -289,19 +297,37 @@ def main():
     db.init_db()
     os.environ["GDJT_CLIENT_AUTH"] = cfg.get("authorization", "")
 
+    # Cookie 是否存在
+    sid = (cfg.get("session") or {}).get("pg_asp_session_id", "")
+    if not sid.strip():
+        warn_banner(log, "缺少登录 Cookie！", [
+            "config.json 里的 session.pg_asp_session_id 为空。",
+            "请按 README「第 1 步」抓取 Cookie 并填写，或先运行: python selftest.py",
+        ])
+        sys.exit(2)
+
     client = make_client(cfg)
     try:
         d = client.get_lecture_list(page=1, page_size=1, status=0)
         if d.get("state") != "success":
-            log.error("登录态无效: %s", d.get("msg", d))
-            log.error("请重新抓 Cookie 更新 config.json 后重启")
+            warn_banner(log, "登录 Cookie 无效或已过期！", [
+                f"接口返回: {d.get('msg', d)}",
+                "请按 README「第 1 步」重新抓取 Cookie 更新 config.json 后重启。",
+                "可先运行: python selftest.py 自检链路。",
+            ])
             sys.exit(2)
         if not client.is_finish_face():
-            log.error("未完成人脸采集，无法报名。请先在微信里完成人脸采集后再运行。")
+            warn_banner(log, "未完成人脸采集！", [
+                "报名前需在微信里完成人脸采集，否则无法报名。",
+            ])
             sys.exit(3)
         log.info("✓ 会话有效，服务器时钟偏差 %.3fs", client.server_offset)
     except SessionExpired as e:
-        log.error("会话失效: %s", e)
+        warn_banner(log, "登录 Cookie 无效或已过期！", [
+            f"异常: {e}",
+            "请按 README「第 1 步」重新抓取 Cookie 更新 config.json 后重启。",
+            "可先运行: python selftest.py 自检链路。",
+        ])
         sys.exit(2)
 
     log.info("开始监控: target_weekdays=%s, target_campus=%s, class_level_limit=%s, 轮询间隔=%ss(+随机1~3s)",
@@ -312,9 +338,8 @@ def main():
     while True:
         try:
             lectures, counts = fetch_matching(cfg, client)
-            log.info("本轮扫描: 有余位=%d 未开启=%d 已报满=%d 已结束=%d | 匹配到可抢=%d",
-                     counts.get(1, 0), counts.get(3, 0), counts.get(2, 0), counts.get(4, 0),
-                     len(lectures))
+            log.info("本轮扫描: 有余位=%d 未开启=%d 已报满=%d | 匹配到可抢=%d",
+                     counts.get(1, 0), counts.get(3, 0), counts.get(2, 0), len(lectures))
             for lec in lectures:
                 notify_and_grab(cfg, client, lec, log, active)
         except SessionExpired as e:

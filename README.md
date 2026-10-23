@@ -56,6 +56,7 @@ Authorization: Basic cTN4YXBwbTV0eHc0MmtoejVjYzg1YWY0OmI1dTRteWVrZDVkYno0cGUxcTF
 ├── gdjt_client.py      # API 客户端（纯标准库，含服务器校时）
 ├── db.py               # SQLite 持久化（已通知/已抢状态，重启不丢）
 ├── mailer.py           # SMTP 邮件通知
+├── selftest.py         # 链路自检（验证抢课各接口是否可用，python selftest.py）
 ├── capture_cookie.py   # mitmproxy 插件（仅抓 Cookie 时用）
 ├── config.json         # 配置文件（Cookie / 星期 / 校区 / 邮箱 / 轮询间隔）
 ├── course_status.db    # 运行后自动生成，状态库

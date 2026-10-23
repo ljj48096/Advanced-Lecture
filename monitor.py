@@ -38,6 +38,19 @@ def make_client(cfg):
     )
 
 
+class ConsoleFilter(logging.Filter):
+    """控制台过滤：排除「本轮扫描」这类原地更新的状态行，避免刷屏。"""
+
+    def filter(self, record):
+        return "本轮扫描" not in record.getMessage()
+
+
+def console_status(text):
+    """在控制台原地更新一行状态（覆盖上一次，不换行，只显示最新一条）。"""
+    sys.stdout.write("\r" + text.ljust(60))
+    sys.stdout.flush()
+
+
 def setup_logging(log_path):
     logger = logging.getLogger("monitor")
     logger.setLevel(logging.INFO)
@@ -47,6 +60,7 @@ def setup_logging(log_path):
         fh.setFormatter(fmt)
         sh = logging.StreamHandler()
         sh.setFormatter(fmt)
+        sh.addFilter(ConsoleFilter())
         logger.addHandler(fh)
         logger.addHandler(sh)
     return logger
@@ -75,17 +89,14 @@ def try_send_email(cfg, log, subject, content):
 
 
 def spin_sleep(seconds):
-    """睡眠 seconds 秒，期间在终端显示转圈动画，表示程序仍在运行。"""
+    """睡眠 seconds 秒，期间在控制台显示转圈动画，表示程序仍在运行。"""
     frames = "|/-\\"
     end = time.time() + seconds
     i = 0
     while time.time() < end:
-        sys.stdout.write(f"\r  监控运行中 {frames[i % 4]} ")
-        sys.stdout.flush()
+        console_status(f"监控运行中 {frames[i % 4]}")
         time.sleep(0.2)
         i += 1
-    sys.stdout.write("\r" + " " * 24 + "\r")
-    sys.stdout.flush()
 
 
 def warn_banner(log, title, lines):
@@ -338,8 +349,10 @@ def main():
     while True:
         try:
             lectures, counts = fetch_matching(cfg, client)
-            log.info("本轮扫描: 有余位=%d 未开启=%d 已报满=%d | 匹配到可抢=%d",
-                     counts.get(1, 0), counts.get(3, 0), counts.get(2, 0), len(lectures))
+            status = (f"本轮扫描: 有余位={counts.get(1, 0)} 未开启={counts.get(3, 0)} "
+                      f"已报满={counts.get(2, 0)} | 匹配到可抢={len(lectures)}")
+            log.info("%s", status)   # 写日志文件（控制台被过滤掉）
+            console_status(status)   # 控制台原地刷新，只显示最新一条
             for lec in lectures:
                 notify_and_grab(cfg, client, lec, log, active)
         except SessionExpired as e:

@@ -88,13 +88,13 @@ def try_send_email(cfg, log, subject, content):
         return False
 
 
-def spin_sleep(seconds):
-    """睡眠 seconds 秒，期间在控制台显示转圈动画，表示程序仍在运行。"""
+def spin_sleep(seconds, status=""):
+    """睡眠 seconds 秒，期间在状态行末尾显示转圈动画，表示程序仍在运行。"""
     frames = "|/-\\"
     end = time.time() + seconds
     i = 0
     while time.time() < end:
-        console_status(f"监控运行中 {frames[i % 4]}")
+        console_status(f"{status} | 监控中 {frames[i % 4]}")
         time.sleep(0.2)
         i += 1
 
@@ -346,6 +346,7 @@ def main():
              cfg.get("class_level_limit"), cfg.get("poll_interval", 5))
     active = {}
     poll = cfg.get("poll_interval", 5)
+    status = ""
     while True:
         try:
             lectures, counts = fetch_matching(cfg, client)
@@ -361,5 +362,5 @@ def main():
             sys.exit(2)
         except Exception as e:
             log.error("本轮异常(继续下一轮): %s", e)
-        # 轮询间隔 + 随机 1~3 秒抖动，避免固定频率被识别；期间显示转圈
-        spin_sleep(poll + random.randint(1, 3))
+        # 轮询间隔 + 随机 1~3 秒抖动；状态行末尾显示转圈表示仍在运行
+        spin_sleep(poll + random.randint(1, 3), status)

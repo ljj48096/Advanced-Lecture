@@ -99,18 +99,26 @@ def parse_server_time(s):
 
 
 def fetch_matching(cfg, client):
-    """拉取【星期匹配 + 校区匹配 + 级别匹配 + 未报满】的课程（status=1有余位 + 3未开启报名）。"""
+    """拉取【星期匹配 + 校区匹配 + 级别匹配 + 未报满】的课程，并返回各状态课程总数。
+
+    返回 (匹配课程列表, {状态码: 总数})。
+    状态码: 1=有余位 2=已报满 3=未开启报名 4=已结束。
+    """
     rule = cfg.get("target_weekdays", "all")
     campus = cfg.get("target_campus", "")
     level_limit = cfg.get("class_level_limit") or {}
     result = {}
+    counts = {}
+
+    # 有余位(1) + 未开启报名(3)：翻页找匹配课程，并记总数
     for status in (1, 3):
         page = 1
         while page <= 20:
             d = client.get_lecture_list(page=page, page_size=50, status=status)
-            rows = (d.get("data") or {}).get("row", [])
-            if not rows:
-                break
+            data = d.get("data") or {}
+            rows = data.get("row", [])
+            if page == 1:
+                counts[status] = data.get("totalcount", 0)
             for r in rows:
                 wd = safe_weekday(r.get("LectureTimeStart", ""))
                 if not wd or not is_weekday_match(wd, rule):
@@ -120,10 +128,16 @@ def fetch_matching(cfg, client):
                 if level_limit and (r.get("ClassLevelName") or "") not in level_limit:
                     continue
                 result[r["DataId"]] = r
-            if len(rows) < 50:
+            if not rows or len(rows) < 50:
                 break
             page += 1
-    return list(result.values())
+
+    # 已报满(2) + 已结束(4)：只取总数，不翻页
+    for status in (2, 4):
+        d = client.get_lecture_list(page=1, page_size=1, status=status)
+        counts[status] = (d.get("data") or {}).get("totalcount", 0)
+
+    return list(result.values()), counts
 
 
 def notify_and_grab(cfg, client, lec, log, active):
@@ -297,7 +311,10 @@ def main():
     poll = cfg.get("poll_interval", 5)
     while True:
         try:
-            lectures = fetch_matching(cfg, client)
+            lectures, counts = fetch_matching(cfg, client)
+            log.info("本轮扫描: 有余位=%d 未开启=%d 已报满=%d 已结束=%d | 匹配到可抢=%d",
+                     counts.get(1, 0), counts.get(3, 0), counts.get(2, 0), counts.get(4, 0),
+                     len(lectures))
             for lec in lectures:
                 notify_and_grab(cfg, client, lec, log, active)
         except SessionExpired as e:

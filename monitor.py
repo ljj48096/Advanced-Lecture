@@ -78,6 +78,11 @@ def weekday_cn(wd):
     return {1: "周一", 2: "周二", 3: "周三", 4: "周四", 5: "周五", 6: "周六", 7: "周日"}.get(wd, f"星期{wd}")
 
 
+def with_level(name, level):
+    """给课程名加级别前缀，如 '[校级] 课程A'；无级别则原样返回。"""
+    return f"[{level}] {name}" if level else name
+
+
 def try_send_email(cfg, log, subject, content):
     """发送邮件，失败只记日志不抛异常。返回是否成功。"""
     try:
@@ -178,9 +183,10 @@ def notify_and_grab(cfg, client, lec, log, active):
     if remain > 0 and not db.is_notified(uid):
         status_hint = {1: "有余位（现在就能抢）", 3: "未开启报名（还没到抢课时间）"}.get(
             lec.get("LectureHallStatus"), lec.get("LectureHallStatusName", ""))
-        subject = f"[抢课通知] 有余位：{name}"
+        disp = with_level(name, lv)
+        subject = f"[抢课通知] 有余位：{disp}"
         content = (f"【发现可抢课程】\n"
-                   f"课程：{name}\n"
+                   f"课程：{disp}\n"
                    f"星期：{weekday_cn(wd)}\n"
                    f"状态：{status_hint}\n"
                    f"剩余名额：{remain}\n"
@@ -188,7 +194,7 @@ def notify_and_grab(cfg, client, lec, log, active):
                    f"地点：{lec.get('Venue')}")
         if try_send_email(cfg, log, subject, content):
             db.mark_notified(uid, name, wd, lv)
-            log.info("已发送邮件通知: 《%s》 剩余 %d", name, remain)
+            log.info("已发送邮件通知: %s 剩余 %d", disp, remain)
 
     # 自动抢课：到达开放时间前后 lead 秒内启动抢课线程
     if remain <= 0:
@@ -216,24 +222,25 @@ def grab_worker(cfg, uid, log, active):
             log.error("[%s] 获取详情失败: %s", uid, det.get("msg", det))
             return
         data = det["data"]
-        title = data.get("Cathedra", uid)
+        raw_title = data.get("Cathedra", uid)
         wd = safe_weekday(data.get("LectureTimeStart", ""))
         lv = data.get("ClassLevelName") or ""
+        title = with_level(raw_title, lv)   # 带级别前缀，用于日志/邮件显示
         if data.get("XSSigningUp"):
-            log.info("《%s》 已报名过", title)
-            db.mark_grabbed(uid, title, wd)
+            log.info("%s 已报名过", title)
+            db.mark_grabbed(uid, raw_title, wd, lv)
             return
         if data.get("LectureHallStatus") == 2:
-            log.info("《%s》 已报满", title)
+            log.info("%s 已报满", title)
             return
 
         sc = client.set_credentials(uid)
         if sc.get("state") != "success":
-            log.error("《%s》 SetCredentials 失败: %s", title, sc.get("msg", sc))
+            log.error("%s SetCredentials 失败: %s", title, sc.get("msg", sc))
             return
         code = (sc.get("data") or {}).get("code")
         if not code:
-            log.error("《%s》 未取得凭证码", title)
+            log.error("%s 未取得凭证码", title)
             return
 
         # 精确等到报名开放时间（服务器时钟）
@@ -246,7 +253,7 @@ def grab_worker(cfg, uid, log, active):
                 time.sleep(min(1.0, remain - 2.5))
             else:
                 time.sleep(0.05)
-        log.info("《%s》 到点，提交报名", title)
+        log.info("%s 到点，提交报名", title)
 
         submitted = False
         for i in range(200):
@@ -264,36 +271,36 @@ def grab_worker(cfg, uid, log, active):
             if any(k in msg for k in ("未登录", "登录失效", "登录过期")):
                 raise SessionExpired(msg)
             if any(k in msg for k in TERMINAL_KEYWORDS):
-                log.info("《%s》 报名失败(终态): %s", title, msg)
-                db.mark_failed(uid, title, wd, lv)
+                log.info("%s 报名失败(终态): %s", title, msg)
+                db.mark_failed(uid, raw_title, wd, lv)
                 try_send_email(cfg, log, f"[抢课失败] {title}",
                                f"【抢课失败】\n课程：{title}\n星期：{weekday_cn(wd)}\n原因：{msg}")
                 return
             time.sleep(0.35)
         if not submitted:
-            log.error("《%s》 重试后仍失败", title)
+            log.error("%s 重试后仍失败", title)
             return
 
         for _ in range(20):
             st = client.get_signin_time(uid)
             state = (st.get("data") or {}).get("state")
             if state == 1:
-                db.mark_grabbed(uid, title, wd, lv)
+                db.mark_grabbed(uid, raw_title, wd, lv)
                 sign_up_time = (st.get("data") or {}).get("signUpTime", "")
-                log.info("🎉 《%s》 抢课成功！继续监控其他符合条件课程", title)
+                log.info("🎉 %s 抢课成功！继续监控其他符合条件课程", title)
                 try_send_email(cfg, log, f"[抢课成功] {title}",
                                f"【抢课成功】\n课程：{title}\n星期：{weekday_cn(wd)}\n"
                                f"报名时间：{sign_up_time}\n地点：{data.get('Venue')}")
                 return
             if state == -1:
-                log.info("《%s》 服务端确认失败", title)
-                db.mark_failed(uid, title, wd, lv)
+                log.info("%s 服务端确认失败", title)
+                db.mark_failed(uid, raw_title, wd, lv)
                 try_send_email(cfg, log, f"[抢课失败] {title}",
                                f"【抢课失败】\n课程：{title}\n星期：{weekday_cn(wd)}\n"
                                f"原因：服务端确认报名失败")
                 return
             time.sleep(1.0)
-        log.warning("《%s》 确认超时，请到「我的报名」核对", title)
+        log.warning("%s 确认超时，请到「我的报名」核对", title)
     except SessionExpired as e:
         log.error("会话失效，需重新抓 Cookie 更新 config.json: %s", e)
     except Exception as e:

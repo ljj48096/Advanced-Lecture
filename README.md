@@ -58,7 +58,7 @@ Authorization: Basic cTN4YXBwbTV0eHc0MmtoejVjYzg1YWY0OmI1dTRteWVrZDVkYno0cGUxcTF
 ├── db.py               # SQLite 持久化（已通知/已抢状态，重启不丢）
 ├── mailer.py           # SMTP 邮件通知
 ├── selftest.py         # 链路自检（python selftest.py）
-├── capture_cookie.py   # mitmproxy 插件（仅抓 Cookie 时用）
+├── capture_cookie.py   # mitmproxy 插件（抓 Cookie 并自动写入 config.json）
 ├── config.json         # 配置文件（Cookie / 星期 / 校区 / 级别 / 邮箱，gitignored）
 ├── config.example.json # 配置模板（不含真实凭据）
 ├── course_status.db    # 运行后自动生成，状态库
@@ -122,15 +122,25 @@ iPhone：`设置 → 无线局域网 → 点电脑热点右边的 ⓘ → 配置
 2. 微信里把 `https://lecture.tongji.edu.cn/wxpage/index` 发到「文件传输助手」→ 点开。
 3. 弹「授权」点允许，进入讲座列表页。
 
-### 1.6 取 Cookie
+### 1.6 取 Cookie（自动写入，无需手动复制）
 
-回到电脑终端，mitmdump 会打印出：
+回到电脑终端，mitmdump 会弹出醒目提示：
 
 ```
-[CAPTURE] {"PG.ASP.Session.ID": "xxxx", "PG.ASP.WeiXinCode.ID": "yyyy"}
+============================================================
+[CAPTURE] 已抓到登录 Cookie，并自动写入 config.json
+          文件: D:\...\Advanced-Lecture\config.json
+          PG.ASP.Session.ID    = xxxxxxxx-xxxx-...
+          PG.ASP.WeiXinCode.ID = yyyyyyyy...
+          无需手动复制，直接运行 python main.py 即可。
+============================================================
 ```
 
-同时项目目录会生成 `captured_cookie.json`。把这两个值填进 `config.json` 的 `session` 字段即可。
+`capture_cookie.py` 会把两个 Cookie **自动写进 `config.json` 的 `session` 字段**，不用手动复制粘贴：
+
+- 如果 `config.json` 还不存在，会以 `config.example.json` 为模板**自动创建**，此时提示里会多一行，提醒你补全 `email` 等配置（见第 2 步）；
+- 如果 `config.json` 已存在，只更新 `session` 两个字段，其他配置原样保留；
+- 值没变化不会重复写文件、重复刷提示。
 
 ### 1.7 清理（可选但建议）
 
@@ -150,6 +160,8 @@ cp config.example.json config.json      # Windows PowerShell: Copy-Item config.e
 ```
 
 > `config.json` 已写进 `.gitignore`，**不会被提交到 Git**，可以放心填自己的 Cookie 和邮箱授权码。
+>
+> 如果第 1 步跑过 `capture_cookie.py`，`config.json` 可能已被自动创建、Cookie 也已自动填好，那就跳过上面的复制，直接补全 `email` 即可。
 
 然后编辑 `config.json`：
 

@@ -47,7 +47,7 @@ class ConsoleFilter(logging.Filter):
 
 def console_status(text):
     """在控制台原地更新一行状态（覆盖上一次，不换行，只显示最新一条）。"""
-    sys.stdout.write("\r" + text.ljust(60))
+    sys.stdout.write("\r" + text.ljust(35))
     sys.stdout.flush()
 
 
@@ -94,7 +94,7 @@ def spin_sleep(seconds, status=""):
     end = time.time() + seconds
     i = 0
     while time.time() < end:
-        console_status(f"{status} | 监控中 {frames[i % 4]}")
+        console_status(f"{status} {frames[i % 4]}")
         time.sleep(0.2)
         i += 1
 
@@ -351,7 +351,7 @@ def main():
         try:
             lectures, counts = fetch_matching(cfg, client)
             status = (f"本轮扫描: 有余位={counts.get(1, 0)} 未开启={counts.get(3, 0)} "
-                      f"已报满={counts.get(2, 0)} | 匹配到可抢={len(lectures)}")
+                      f"已报满={counts.get(2, 0)} 可抢={len(lectures)}")
             log.info("%s", status)   # 写日志文件（控制台被过滤掉）
             console_status(status)   # 控制台原地刷新，只显示最新一条
             for lec in lectures:

@@ -46,6 +46,8 @@ Authorization: Basic cTN4YXBwbTV0eHc0MmtoejVjYzg1YWY0OmI1dTRteWVrZDVkYno0cGUxcTF
 
 **抢课以服务器时钟为准**：接口响应里带 `nowtime`，客户端据此自动校时，不信任本机时间。
 
+**网络容错**：单次请求超时 10 秒；超时/TLS 握手失败/5xx 会退避重试（0.5s、1.0s），4xx 与 401/403 不重试（后者直接判定会话失效）。请求默认**直连**，不受系统代理影响。
+
 ---
 
 ## 文件结构
@@ -266,6 +268,7 @@ python main.py
 | --- | --- |
 | 启动弹 `!!!` 警告「Cookie 无效/过期/缺失」 | 重新走一遍「第 1 步」抓 Cookie，或先 `python selftest.py` 自检 |
 | 运行中报「会话失效」退出 | 同上，更新 `config.json` 后重启 |
+| 日志里偶尔出现 `本轮异常(继续下一轮): <urlopen error timed out>` | 网络抖动，请求在 10 秒内没连上（`_ssl.c:1112: The handshake operation timed out` 是 TLS 握手超时）。程序已自动**退避重试 2 次**（0.5s、1.0s），仍失败才跳过本轮，下一轮自动恢复，无需干预。若连续失败 5 轮会弹警告横幅——检查网络，或关掉 Clash/梯子的「全局/TUN」模式（程序默认**直连**，不读 `HTTP(S)_PROXY` 环境变量；确需走代理时启动前设 `GDJT_USE_ENV_PROXY=1`） |
 | 邮件发不出去 | 检查 `sender_pwd` 是否为**授权码**（非登录密码）；确认已开启 SMTP |
 | 未完成人脸采集 | 程序会拒绝启动并提示，先去微信里完成采集 |
 | 抢课没抢到 | 名额可能瞬间被抢空/触发服务端冷却，程序会记录日志并继续下一门；以「我的报名」为准 |

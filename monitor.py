@@ -51,6 +51,12 @@ def console_status(text):
     sys.stdout.flush()
 
 
+def console_clear(width=70):
+    """清掉原地状态行，避免日志和状态行挤在同一行。"""
+    sys.stdout.write("\r" + " " * width + "\r")
+    sys.stdout.flush()
+
+
 def setup_logging(log_path):
     logger = logging.getLogger("monitor")
     logger.setLevel(logging.INFO)
@@ -106,6 +112,7 @@ def spin_sleep(seconds, status=""):
 
 def warn_banner(log, title, lines):
     """打印醒目的多行警告横幅。"""
+    console_clear()
     log.warning("!" * 60)
     log.warning("!! %s", title)
     for ln in lines:
@@ -354,9 +361,11 @@ def main():
     active = {}
     poll = cfg.get("poll_interval", 5)
     status = ""
+    fails = 0
     while True:
         try:
             lectures, counts = fetch_matching(cfg, client)
+            fails = 0
             status = (f"本轮扫描: 有余位={counts.get(1, 0)} 未开启={counts.get(3, 0)} "
                       f"已报满={counts.get(2, 0)} 可抢={len(lectures)}")
             log.info("%s", status)   # 写日志文件（控制台被过滤掉）
@@ -364,10 +373,22 @@ def main():
             for lec in lectures:
                 notify_and_grab(cfg, client, lec, log, active)
         except SessionExpired as e:
+            console_clear()
             log.error("会话失效: %s", e)
             log.error("请重新抓 Cookie 更新 config.json 后重启程序")
             sys.exit(2)
         except Exception as e:
-            log.error("本轮异常(继续下一轮): %s", e)
+            # 网络抖动（超时/SSL 握手超时）已由客户端自动重试 2 次，走到这里说明仍失败
+            fails += 1
+            console_clear()
+            log.error("本轮异常(继续下一轮): %s （连续失败 %d 轮）", e, fails)
+            if fails in (5, 20):
+                warn_banner(log, "连续多轮请求失败，请检查网络", [
+                    f"已连续失败 {fails} 轮，最近一次: {e}",
+                    "1) 检查本机网络 / 校园网是否正常；",
+                    "2) 若开着 Clash/梯子，请关闭「全局/TUN」或退出代理软件",
+                    "   （本程序默认直连，不读 HTTP(S)_PROXY 环境变量）；",
+                    "3) 若必须走代理，启动前设置 GDJT_USE_ENV_PROXY=1。",
+                ])
         # 轮询间隔 + 随机 1~3 秒抖动；状态行末尾显示转圈表示仍在运行
         spin_sleep(poll + random.randint(1, 3), status)

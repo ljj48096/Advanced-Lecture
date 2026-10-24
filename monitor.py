@@ -25,6 +25,10 @@ import mailer
 CONFIG_PATH = "config.json"
 TERMINAL_KEYWORDS = ("满", "已报名", "存在", "不能", "无权", "人脸", "超过", "频繁", "无效时间")
 
+# 详情接口显示「已报满」后，多少秒内不再为这门课起抢课线程。
+# 列表接口有缓存延迟（名额被抢光后仍显示有余位），不设冷却会每轮都重试刷屏。
+FULL_COOLDOWN = 300
+
 
 def load_config():
     with open(CONFIG_PATH, encoding="utf-8") as f:
@@ -171,7 +175,7 @@ def fetch_matching(cfg, client):
     return list(result.values()), counts
 
 
-def notify_and_grab(cfg, client, lec, log, active):
+def notify_and_grab(cfg, client, lec, log, active, full_until):
     uid = lec["DataId"]
     name = lec.get("Cathedra", "")
     wd = safe_weekday(lec.get("LectureTimeStart", ""))
@@ -214,13 +218,16 @@ def notify_and_grab(cfg, client, lec, log, active):
     except Exception:
         return
     lead = cfg.get("grab_prepare_lead_seconds", 180)
+    if full_until.get(uid, 0) > time.time():      # 刚确认过已报满，冷却中
+        return
     if client.server_now() >= open_ts - lead and uid not in active:
         active[uid] = True
-        t = threading.Thread(target=grab_worker, args=(cfg, uid, log, active), daemon=True)
+        t = threading.Thread(target=grab_worker,
+                             args=(cfg, uid, log, active, full_until), daemon=True)
         t.start()
 
 
-def grab_worker(cfg, uid, log, active):
+def grab_worker(cfg, uid, log, active, full_until):
     """单门课程完整抢课流程（独立 client + 服务器时钟精确等待）。"""
     client = make_client(cfg)
     try:
@@ -238,7 +245,8 @@ def grab_worker(cfg, uid, log, active):
             db.mark_grabbed(uid, raw_title, wd, lv)
             return
         if data.get("LectureHallStatus") == 2:
-            log.info("%s 已报满", title)
+            full_until[uid] = time.time() + FULL_COOLDOWN
+            log.info("%s 已报满（列表数据有延迟），%d 分钟内不再重试", title, FULL_COOLDOWN // 60)
             return
 
         sc = client.set_credentials(uid)
@@ -247,7 +255,9 @@ def grab_worker(cfg, uid, log, active):
             return
         code = (sc.get("data") or {}).get("code")
         if not code:
-            log.error("%s 未取得凭证码", title)
+            full_until[uid] = time.time() + FULL_COOLDOWN
+            log.info("%s 未取得凭证码（已满或无资格），%d 分钟内不再重试",
+                     title, FULL_COOLDOWN // 60)
             return
 
         # 精确等到报名开放时间（服务器时钟）
@@ -359,6 +369,7 @@ def main():
              cfg.get("target_weekdays"), cfg.get("target_campus", ""),
              cfg.get("class_level_limit"), cfg.get("poll_interval", 5))
     active = {}
+    full_until = {}
     poll = cfg.get("poll_interval", 5)
     status = ""
     fails = 0
@@ -371,7 +382,7 @@ def main():
             log.info("%s", status)   # 写日志文件（控制台被过滤掉）
             console_status(status)   # 控制台原地刷新，只显示最新一条
             for lec in lectures:
-                notify_and_grab(cfg, client, lec, log, active)
+                notify_and_grab(cfg, client, lec, log, active, full_until)
         except SessionExpired as e:
             console_clear()
             log.error("会话失效: %s", e)

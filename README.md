@@ -250,7 +250,7 @@ python main.py
 
 ### 抢课流程（每门课）
 
-1. `GetLectureHall` 查详情：已报名过则跳过，已报满则跳过；
+1. `GetLectureHall` 查详情：已报名过则跳过，已报满则跳过（列表接口有缓存延迟，名额被抢光后仍显示「有余位」；一旦详情确认已满，该课 **5 分钟内不再重复检查**，避免每轮刷日志）；
 2. `SetCredentials` 领取报名凭证码 `code`；
 3. 用**服务器时钟**精确等到 `TimeSigningUp`；
 4. `SginInLectureHallCredentials(code)` 提交报名（带重试，识别满员/资格等终态错误及时止损）；

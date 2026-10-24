@@ -174,7 +174,12 @@ cp config.example.json config.json      # Windows PowerShell: Copy-Item config.e
     "pg_asp_weixin_code_id": "第1步抓到的 PG.ASP.WeiXinCode.ID"
   },
   "authorization": "Basic ...（固定值，不用改）",
-  "poll_interval": 5,              // 轮询间隔（秒），实际每次会再加 1~3 秒随机抖动
+  "poll_interval": 5,              // 轮询间隔（秒）
+  "poll_jitter": {                 // 每次轮询额外加的随机抖动（秒）；默认开启 1~3 秒
+    "enabled": true,               // false = 关闭抖动，严格按 poll_interval 轮询
+    "min": 1,                      // 抖动下限（含）
+    "max": 3                       // 抖动上限（含）；可写成 5/10 等任意范围
+  },
   "target_weekdays": "all",        // 目标星期："all" 或 [1,3,5]（1=周一…7=周日）
   "target_campus": "四平路校区",    // 目标校区：Venue 含此关键词即匹配；留空 "" = 不限校区
   "class_level_limit": {           // 级别限抢：键=级别(校级/院级)，值=该级别最多抢几门；{} = 不限
@@ -196,6 +201,8 @@ cp config.example.json config.json      # Windows PowerShell: Copy-Item config.e
 **邮箱授权码**怎么拿（以 163 为例）：
 登录 163 邮箱网页版 → `设置 → POP3/SMTP/IMAP` → 开启「SMTP 服务」→ 按提示生成授权码，填到 `sender_pwd`。
 
+**轮询节奏与抖动**：实际每轮间隔 = `poll_interval` + `poll_jitter` 范围内的随机秒数（默认 1~3 秒）。加抖动是为了让请求间隔不呈机械的固定节律（更像真人刷新，也不容易踩到服务端的固定采样点）。想让节奏完全固定就设 `"enabled": false`；想抖得更散就调大 `min`/`max`。`min` 和 `max` 写反了程序会自动对调，`max` ≤ 0 等同关闭。
+
 ---
 
 ## 第 3 步：运行
@@ -214,10 +221,12 @@ python main.py
 启动后若 Cookie 有效，打印：
 ```
 ✓ 会话有效，服务器时钟偏差 0.031s
-开始监控: target_weekdays=all, target_campus=四平路校区, class_level_limit={'校级': 2, '院级': 5}, 轮询间隔=60s(+随机1~3s)
+开始监控: target_weekdays=all, target_campus=四平路校区, class_level_limit={'校级': 2, '院级': 5}, 轮询间隔=5s(+随机1~3s)
 ```
 
-然后进入常驻监控，每轮（间隔 + 随机 1~3 秒抖动）会：
+> 末尾的 `(+随机1~3s)` 来自配置 `poll_jitter`；关掉抖动后这里会显示 `(无抖动)`。
+
+然后进入常驻监控，每轮（间隔 + `poll_jitter` 抖动，默认 1~3 秒）会：
 - 打印状态统计：`本轮扫描: 有余位=0 未开启=0 已报满=23 可抢=0`
 - 等待期间终端显示转圈 `监控运行中 | / - \`，表示程序仍在运行
 - 出现【星期匹配 + 校区匹配 + 级别匹配 + 有余量】的课 → 发邮件通知（每门只发一次）；终端日志和邮件中课程名带级别前缀，如 `[校级] 课程A`
@@ -279,6 +288,12 @@ python main.py
 - 只想抢某几天的课：`"target_weekdays": [2,4,5]`（周二四、五）。
 - 只想抢某校区：`"target_campus": "四平路校区"`；不限校区：`"target_campus": ""`。
 - 想按级别限抢：`"class_level_limit": {"校级": 2, "院级": 5}`（校级最多抢 2 门、院级最多抢 5 门）；`{}` = 不限级别不限数量。
+
+### 调整轮询节奏
+
+- 抢课靠的是「先到先得」，轮询越密越容易抢到，但请求过密可能被服务端限流。秒空的课建议 `"poll_interval": 3~5`。
+- 抖动（`poll_jitter`）默认开启 1~3 秒，让每次请求的间隔不固定；不需要就设 `"enabled": false`。
+- 喜欢更分散的节奏：`"poll_jitter": {"enabled": true, "min": 2, "max": 8}`，实际间隔 = `poll_interval` + 2~8 秒。
 
 ### 关于「校区」匹配的说明
 

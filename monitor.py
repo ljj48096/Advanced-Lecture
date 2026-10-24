@@ -103,6 +103,43 @@ def try_send_email(cfg, log, subject, content):
         return False
 
 
+DEFAULT_JITTER = (1, 3)   # config 未配置 poll_jitter 时的默认抖动范围（秒）
+
+
+def jitter_range(cfg):
+    """解析轮询抖动配置，返回 (lo, hi)；已关闭返回 None。
+
+    config: "poll_jitter": {"enabled": true, "min": 1, "max": 3}
+    未配置时默认开启 1~3 秒（兼容旧 config）。
+    """
+    j = cfg.get("poll_jitter")
+    if not isinstance(j, dict):
+        return DEFAULT_JITTER
+    if not j.get("enabled", True):
+        return None
+    try:
+        lo, hi = int(j.get("min", DEFAULT_JITTER[0])), int(j.get("max", DEFAULT_JITTER[1]))
+    except (TypeError, ValueError):
+        return DEFAULT_JITTER
+    if hi <= 0:
+        return None
+    if lo > hi:
+        lo, hi = hi, lo
+    return max(0, lo), max(0, hi)
+
+
+def random_jitter(cfg):
+    """本次轮询额外睡的随机秒数（关闭抖动时为 0）。"""
+    r = jitter_range(cfg)
+    return 0 if r is None else random.randint(r[0], r[1])
+
+
+def jitter_text(cfg):
+    """用于启动日志的描述文字。"""
+    r = jitter_range(cfg)
+    return f"+随机{r[0]}~{r[1]}s" if r else "无抖动"
+
+
 def spin_sleep(seconds, status=""):
     """睡眠 seconds 秒，期间在状态行末尾显示转圈动画，表示程序仍在运行。"""
     frames = "|/-\\"
@@ -365,9 +402,9 @@ def main():
         ])
         sys.exit(2)
 
-    log.info("开始监控: target_weekdays=%s, target_campus=%s, class_level_limit=%s, 轮询间隔=%ss(+随机1~3s)",
+    log.info("开始监控: target_weekdays=%s, target_campus=%s, class_level_limit=%s, 轮询间隔=%ss(%s)",
              cfg.get("target_weekdays"), cfg.get("target_campus", ""),
-             cfg.get("class_level_limit"), cfg.get("poll_interval", 5))
+             cfg.get("class_level_limit"), cfg.get("poll_interval", 5), jitter_text(cfg))
     active = {}
     full_until = {}
     poll = cfg.get("poll_interval", 5)
@@ -401,5 +438,6 @@ def main():
                     "   （本程序默认直连，不读 HTTP(S)_PROXY 环境变量）；",
                     "3) 若必须走代理，启动前设置 GDJT_USE_ENV_PROXY=1。",
                 ])
-        # 轮询间隔 + 随机 1~3 秒抖动；状态行末尾显示转圈表示仍在运行
-        spin_sleep(poll + random.randint(1, 3), status)
+        # 轮询间隔 + 可配置随机抖动（默认 1~3 秒，可在 config 里关闭/改范围）；
+        # 状态行末尾显示转圈，表示仍在运行
+        spin_sleep(poll + random_jitter(cfg), status)

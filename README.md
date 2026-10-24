@@ -143,7 +143,15 @@ iPhone：`设置 → 无线局域网 → 点电脑热点右边的 ⓘ → 配置
 
 ## 第 2 步：填写配置
 
-编辑 `config.json`：
+先把仓库里的配置模板复制（或改名）为正式配置：
+
+```bash
+cp config.example.json config.json      # Windows PowerShell: Copy-Item config.example.json config.json
+```
+
+> `config.json` 已写进 `.gitignore`，**不会被提交到 Git**，可以放心填自己的 Cookie 和邮箱授权码。
+
+然后编辑 `config.json`：
 
 ```jsonc
 {

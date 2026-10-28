@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """同济高等讲堂 监控 + 自动抢课系统
 
-按 config.json 的 target_weekdays 筛选课程：
-  - 符合星期且有余量的课程 -> 发邮件通知一次
+按 config.json 的 target_weekdays / target_campus / class_level_limit 筛选课程，
+再用 SetCredentials 探测报名资格：
+  - 不匹配筛选条件、或无报名资格的课程不计入统计，只汇总到「已过滤」
   - 到达报名开放时间(TimeSigningUp, 以服务器时钟为准) -> 自动抢课
-  - 抢课成功 -> 停止监控该课程，继续监控其余课程
+  - 抢课成功 -> 发邮件通知，并停止监控该课程，继续监控其余课程
+  - 提交时发现已报满 -> 当作「没有余位」继续监控，不标记失败
 状态持久化到 SQLite (course_status.db)，日志写入 monitor.log。
 
 用法: python monitor.py
@@ -13,9 +15,11 @@ import json
 import logging
 import os
 import random
+import re
 import sys
 import threading
 import time
+import unicodedata
 from datetime import datetime
 
 from gdjt_client import GdjtClient, SessionExpired
@@ -23,7 +27,11 @@ import db
 import mailer
 
 CONFIG_PATH = "config.json"
-TERMINAL_KEYWORDS = ("满", "已报名", "存在", "不能", "无权", "人脸", "超过", "频繁", "无效时间")
+# 提交接口返回「已满」类提示：说明名额已被抢光，按「没有余位」继续监控，
+# 不标记失败、也不冷却——等有人退课释放名额后还能再抢。
+FULL_KEYWORDS = ("满",)
+# 其他终态错误（资格/人脸/重复报名等），标记失败后不再重试。
+TERMINAL_KEYWORDS = ("已报名", "存在", "不能", "无权", "人脸", "超过", "频繁", "无效时间")
 
 # 详情接口显示「已报满」后，多少秒内不再为这门课起抢课线程。
 # 列表接口有缓存延迟（名额被抢光后仍显示有余位），不设冷却会每轮都重试刷屏。
@@ -49,16 +57,107 @@ class ConsoleFilter(logging.Filter):
         return "本轮扫描" not in record.getMessage()
 
 
+_last_status_w = 0
+
+
+def _display_width(text):
+    """终端显示宽度：中文/全角按 2 列算，避免状态行残留。"""
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
+
 def console_status(text):
     """在控制台原地更新一行状态（覆盖上一次，不换行，只显示最新一条）。"""
-    sys.stdout.write("\r" + text.ljust(35))
+    global _last_status_w
+    width = _display_width(text)
+    pad = " " * max(0, _last_status_w - width)
+    sys.stdout.write("\r" + text + pad)
     sys.stdout.flush()
+    _last_status_w = width
 
 
 def console_clear(width=70):
     """清掉原地状态行，避免日志和状态行挤在同一行。"""
-    sys.stdout.write("\r" + " " * width + "\r")
+    global _last_status_w
+    n = max(width, _last_status_w)
+    sys.stdout.write("\r" + " " * n + "\r")
     sys.stdout.flush()
+    _last_status_w = 0
+
+
+# ---------- 控制台彩色日志（只影响终端，文件日志保持纯文本）----------
+
+def _enable_ansi():
+    """让 Windows 控制台支持 ANSI 转义；失败则退回无色输出。"""
+    if os.name != "nt":
+        return True
+    ok = False
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        for std in (-11, -12):                       # STDOUT / STDERR
+            handle = kernel32.GetStdHandle(std)
+            mode = ctypes.c_uint32()
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                ok = bool(kernel32.SetConsoleMode(handle, mode.value | 0x0004)) or ok
+    except Exception:
+        return False
+    return ok
+
+
+# 日志输出到终端才加色（StreamHandler 默认写 stderr）；尊重 NO_COLOR 约定
+COLOR_ENABLED = (sys.stderr.isatty() and "NO_COLOR" not in os.environ and _enable_ansi())
+
+_RESET = "\033[0m"
+_STYLE = {
+    "bold_green": "\033[1;32m",
+    "green": "\033[32m",
+    "red": "\033[1;31m",
+    "yellow": "\033[33m",
+    "cyan": "\033[36m",
+}
+
+# 关键字 -> 颜色；按长度倒序参与正则，保证长词优先匹配
+_KEYWORDS = {
+    "抢课成功": "bold_green",
+    "会话有效": "green",
+    "已报满": "yellow",
+    "已满": "yellow",
+    "未取得凭证": "yellow",
+    "到点": "cyan",
+    "失败": "red",
+    "异常": "red",
+    "失效": "red",
+}
+_KEYWORD_RE = re.compile("|".join(
+    re.escape(k) for k in sorted(_KEYWORDS, key=len, reverse=True)))
+
+_LEVEL_STYLE = {
+    logging.WARNING: "\033[33m",
+    logging.ERROR: "\033[1;31m",
+    logging.CRITICAL: "\033[1;31m",
+}
+
+
+def _highlight(text):
+    """给消息里的关键字上色（未启用颜色时原样返回）。"""
+    if not COLOR_ENABLED:
+        return text
+    return _KEYWORD_RE.sub(
+        lambda m: _STYLE[_KEYWORDS[m.group(0)]] + m.group(0) + _RESET, text)
+
+
+class ConsoleFormatter(logging.Formatter):
+    """控制台专用格式：级别与关键字上色；复制记录，不影响文件日志。"""
+
+    def format(self, record):
+        rec = logging.makeLogRecord(record.__dict__)
+        rec.msg, rec.args = _highlight(record.getMessage()), ()
+        text = super().format(rec)
+        style = _LEVEL_STYLE.get(record.levelno)
+        if COLOR_ENABLED and style:
+            text = text.replace(f"[{record.levelname}]",
+                                f"{style}[{record.levelname}]{_RESET}", 1)
+        return text
 
 
 def setup_logging(log_path):
@@ -69,7 +168,8 @@ def setup_logging(log_path):
         fh = logging.FileHandler(log_path, encoding="utf-8")
         fh.setFormatter(fmt)
         sh = logging.StreamHandler()
-        sh.setFormatter(fmt)
+        sh.setFormatter(ConsoleFormatter("%(asctime)s [%(levelname)s] %(message)s",
+                                         "%Y-%m-%d %H:%M:%S"))
         sh.addFilter(ConsoleFilter())
         logger.addHandler(fh)
         logger.addHandler(sh)
@@ -171,50 +271,136 @@ def parse_server_time(s):
     return GdjtClient._parse_server_time(s)
 
 
-def fetch_matching(cfg, client):
-    """拉取【星期匹配 + 校区匹配 + 级别匹配 + 未报满】的课程，并返回各状态课程总数。
+PAGE_SIZE = 50
+MAX_PAGES = 20
+MAX_PROBES_PER_ROUND = 50   # 每轮最多新增多少次资格探测，避免首轮 POST 风暴
 
-    返回 (匹配课程列表, {状态码: 总数})。
-    状态码: 1=有余位 2=已报满 3=未开启报名。
+# SetCredentials 明确失败时，这些提示属于临时性错误，不作为「无资格」缓存
+PROBE_TRANSIENT = ("频繁", "超时", "稍后", "系统", "未到", "未开始", "未开放",
+                   "不在报名时间", "报名时间未", "还没", "人脸")
+# 失败提示里出现这些词，多半是已满而不是无资格
+PROBE_FULL = ("满", "上限", "名额", "人数")
+# 已经报过名，仍算有资格（后续抢课线程会把它标记为已抢到）
+PROBE_ALREADY = ("已报名", "已存在")
+
+
+def iter_lecture_rows(client, status):
+    """逐页拉取某状态的讲座行。"""
+    page = 1
+    while page <= MAX_PAGES:
+        d = client.get_lecture_list(page=page, page_size=PAGE_SIZE, status=status)
+        rows = (d.get("data") or {}).get("row", [])
+        for r in rows:
+            yield r
+        if len(rows) < PAGE_SIZE:
+            break
+        page += 1
+
+
+def check_eligibility(client, uid, cache, budget):
+    """用 SetCredentials 探测报名资格，返回 (verdict, fresh)。
+
+    verdict:
+      ok       有凭证码（或已报名），有资格
+      no       接口明确拒绝，无报名资格
+      no_code  成功但没有凭证码，多半是已满，按不可报处理
+      unknown  探测失败/临时错误/本轮额度用完，暂不判定
+    """
+    now = time.time()
+    hit = cache.get(uid)
+    if hit:
+        verdict, ts = hit
+        if verdict == "ok":
+            return verdict, False
+        ttl = 1800 if verdict == "no" else FULL_COOLDOWN
+        if now - ts < ttl:
+            return verdict, False
+
+    if budget[0] <= 0:
+        return "unknown", False
+    budget[0] -= 1
+
+    try:
+        sc = client.set_credentials(uid)
+    except SessionExpired:
+        raise
+    except Exception:
+        return "unknown", False
+
+    msg = str(sc.get("msg") or "")
+    if any(k in msg for k in ("未登录", "登录失效", "登录过期")):
+        raise SessionExpired(msg)
+    if any(k in msg for k in PROBE_ALREADY):
+        cache[uid] = ("ok", now)
+        return "ok", True
+    if sc.get("state") != "success":
+        if any(k in msg for k in PROBE_FULL):
+            cache[uid] = ("no_code", now)
+            return "no_code", True
+        if any(k in msg for k in PROBE_TRANSIENT):
+            return "unknown", False
+        cache[uid] = ("no", now)
+        return "no", True
+    if (sc.get("data") or {}).get("code"):
+        cache[uid] = ("ok", now)
+        return "ok", True
+    cache[uid] = ("no_code", now)
+    return "no_code", True
+
+
+def fetch_matching(cfg, client, elig_cache, active):
+    """拉取【星期 + 校区 + 级别 + 报名资格】都通过的课程，并统计过滤数量。
+
+    返回 (候选课程列表, {状态码: 课程数}, 条件过滤数, 无资格过滤数)。
+    状态码: 1=有余位 2=已报满 3=未开启报名。所有计数均为过滤后的口径。
     """
     rule = cfg.get("target_weekdays", "all")
     campus = cfg.get("target_campus", "")
     level_limit = cfg.get("class_level_limit") or {}
-    result = {}
-    counts = {}
+    selected = {}
+    seen = set()
+    counts = {1: 0, 2: 0, 3: 0}
+    filtered_cond = 0
+    filtered_elig = 0
+    budget = [MAX_PROBES_PER_ROUND]
 
-    # 有余位(1) + 未开启报名(3)：翻页找匹配课程，并记总数
-    for status in (1, 3):
-        page = 1
-        while page <= 20:
-            d = client.get_lecture_list(page=page, page_size=50, status=status)
-            data = d.get("data") or {}
-            rows = data.get("row", [])
-            if page == 1:
-                counts[status] = data.get("totalcount", 0)
-            for r in rows:
-                wd = safe_weekday(r.get("LectureTimeStart", ""))
-                if not wd or not is_weekday_match(wd, rule):
-                    continue
-                if campus and campus not in (r.get("Venue") or ""):
-                    continue
-                if level_limit and (r.get("ClassLevelName") or "") not in level_limit:
-                    continue
-                result[r["DataId"]] = r
-            if not rows or len(rows) < 50:
-                break
-            page += 1
+    # 先处理可抢的 1/3，再处理已报满的 2，保证探测额度优先用在候选课上
+    for status in (1, 3, 2):
+        for r in iter_lecture_rows(client, status):
+            uid = r.get("DataId")
+            if not uid or uid in seen:
+                continue
+            seen.add(uid)
 
-    # 已报满(2)：只取总数，不翻页
-    d = client.get_lecture_list(page=1, page_size=1, status=2)
-    counts[2] = (d.get("data") or {}).get("totalcount", 0)
+            wd = safe_weekday(r.get("LectureTimeStart", ""))
+            if not wd or not is_weekday_match(wd, rule):
+                filtered_cond += 1
+                continue
+            if campus and campus not in (r.get("Venue") or ""):
+                filtered_cond += 1
+                continue
+            if level_limit and (r.get("ClassLevelName") or "") not in level_limit:
+                filtered_cond += 1
+                continue
 
-    return list(result.values()), counts
+            # 正在抢课的课程不再探测，避免重复领码覆盖抢课线程手里的凭证码
+            if uid in active:
+                verdict = "ok"
+            else:
+                verdict, _ = check_eligibility(client, uid, elig_cache, budget)
+            if verdict == "no":
+                filtered_elig += 1
+                continue
+
+            counts[status] += 1
+            if status in (1, 3):
+                selected[uid] = r
+
+    return list(selected.values()), counts, filtered_cond, filtered_elig
 
 
 def notify_and_grab(cfg, client, lec, log, active, full_until):
     uid = lec["DataId"]
-    name = lec.get("Cathedra", "")
     wd = safe_weekday(lec.get("LectureTimeStart", ""))
     if not wd:
         return
@@ -226,23 +412,6 @@ def notify_and_grab(cfg, client, lec, log, active, full_until):
         return
     if lec.get("LectureHallStatus") == 2:  # 已报满
         return
-
-    # 邮件通知（有余量且未通知过，只发一次；含「未开启报名」即还没到抢课时间的课）
-    if remain > 0 and not db.is_notified(uid):
-        status_hint = {1: "有余位（现在就能抢）", 3: "未开启报名（还没到抢课时间）"}.get(
-            lec.get("LectureHallStatus"), lec.get("LectureHallStatusName", ""))
-        disp = with_level(name, lv)
-        subject = f"[抢课通知] 有余位：{disp}"
-        content = (f"【发现可抢课程】\n"
-                   f"课程：{disp}\n"
-                   f"星期：{weekday_cn(wd)}\n"
-                   f"状态：{status_hint}\n"
-                   f"剩余名额：{remain}\n"
-                   f"报名开放时间：{lec.get('TimeSigningUp')}\n"
-                   f"地点：{lec.get('Venue')}")
-        if try_send_email(cfg, log, subject, content):
-            db.mark_notified(uid, name, wd, lv)
-            log.info("已发送邮件通知: %s 剩余 %d", disp, remain)
 
     # 自动抢课：到达开放时间前后 lead 秒内启动抢课线程
     if remain <= 0:
@@ -324,11 +493,14 @@ def grab_worker(cfg, uid, log, active, full_until):
             msg = str(r.get("msg", r))
             if any(k in msg for k in ("未登录", "登录失效", "登录过期")):
                 raise SessionExpired(msg)
+            if any(k in msg for k in FULL_KEYWORDS):
+                # 提交时才发现已满：不标记失败、不冷却，当作「没有余位」的课程继续监控。
+                # 等有人退课释放名额，后续轮次还能再抢。
+                log.info("%s 提交时已满，继续监控余位", title)
+                return
             if any(k in msg for k in TERMINAL_KEYWORDS):
                 log.info("%s 报名失败(终态): %s", title, msg)
                 db.mark_failed(uid, raw_title, wd, lv)
-                try_send_email(cfg, log, f"[抢课失败] {title}",
-                               f"【抢课失败】\n课程：{title}\n星期：{weekday_cn(wd)}\n原因：{msg}")
                 return
             time.sleep(0.35)
         if not submitted:
@@ -349,9 +521,6 @@ def grab_worker(cfg, uid, log, active, full_until):
             if state == -1:
                 log.info("%s 服务端确认失败", title)
                 db.mark_failed(uid, raw_title, wd, lv)
-                try_send_email(cfg, log, f"[抢课失败] {title}",
-                               f"【抢课失败】\n课程：{title}\n星期：{weekday_cn(wd)}\n"
-                               f"原因：服务端确认报名失败")
                 return
             time.sleep(1.0)
         log.warning("%s 确认超时，请到「我的报名」核对", title)
@@ -407,15 +576,19 @@ def main():
              cfg.get("class_level_limit"), cfg.get("poll_interval", 5), jitter_text(cfg))
     active = {}
     full_until = {}
+    elig_cache = {}
     poll = cfg.get("poll_interval", 5)
     status = ""
     fails = 0
     while True:
         try:
-            lectures, counts = fetch_matching(cfg, client)
+            lectures, counts, filtered_cond, filtered_elig = fetch_matching(
+                cfg, client, elig_cache, active)
             fails = 0
             status = (f"本轮扫描: 有余位={counts.get(1, 0)} 未开启={counts.get(3, 0)} "
-                      f"已报满={counts.get(2, 0)} 可抢={len(lectures)}")
+                      f"已报满={counts.get(2, 0)} 可抢={len(lectures)} "
+                      f"已过滤={filtered_cond + filtered_elig}"
+                      f"(条件{filtered_cond}/无资格{filtered_elig})")
             log.info("%s", status)   # 写日志文件（控制台被过滤掉）
             console_status(status)   # 控制台原地刷新，只显示最新一条
             for lec in lectures:

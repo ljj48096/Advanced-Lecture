@@ -171,6 +171,15 @@ def dash_ok():
     return bool(_DASH["ok"])
 
 
+def _to_panel_top(drawn):
+    """把光标移回面板第一行的行首。
+
+    面板最后一行末尾没有换行符，光标就停在第 drawn 行上，所以只需上移 drawn-1 行。
+    上移 drawn 行会多退一行，把面板上方的日志吃掉——这正是早期版本「吃信息」的原因。
+    """
+    return (f"\033[{drawn - 1}A" if drawn > 1 else "") + "\r"
+
+
 def _dash_render():
     """擦掉旧面板后在原位重绘（调用方需持锁）。"""
     if not dash_ok() or _DASH["suspended"]:
@@ -181,10 +190,8 @@ def _dash_render():
         lines.append(_fit(_DASH["status"], width))
     for text in _DASH["grabs"].values():
         lines.append(_fit(text, width))
-    buf = ""
-    if _DASH["drawn"]:
-        buf += f"\033[{_DASH['drawn']}A\r"      # 光标回到面板第一行
-    buf += "\033[J"                              # 清到屏幕末尾（不残留旧字符）
+    buf = _to_panel_top(_DASH["drawn"]) if _DASH["drawn"] else ""
+    buf += "\033[J"                              # 从面板顶部清到屏幕末尾，不留残字
     if lines:
         buf += "\n".join(lines)
     _DASH["drawn"] = len(lines)
@@ -197,7 +204,7 @@ def dash_erase():
     with _dash_lock:
         if not dash_ok() or not _DASH["drawn"]:
             return
-        sys.stdout.write(f"\033[{_DASH['drawn']}A\r\033[J")
+        sys.stdout.write(_to_panel_top(_DASH["drawn"]) + "\033[J")
         sys.stdout.flush()
         _DASH["drawn"] = 0
 

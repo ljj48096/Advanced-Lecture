@@ -632,7 +632,7 @@ def notify_and_grab(cfg, client, lec, log, active):
     if client.server_now() >= open_ts - lead and uid not in active:
         active[uid] = True
         note_grab_start(uid, log,
-                        f"🎯 开始抢课：{disp}（剩余 {remain} 个名额，每 "
+                        f"抢课进度 开始抢课：{disp}（剩余 {remain} 个名额，每 "
                         f"{cfg.get('grab_retry_interval', 0.5)}s 提交一次）")
         dash_grab(uid, f"🎯 {disp} 启动抢课（剩余 {remain} 个名额）")
         t = threading.Thread(target=grab_worker,
@@ -721,9 +721,10 @@ def grab_worker(cfg, uid, log, active):
             except Exception as e:
                 # 提交接口偶发超时/断连：不要静默重试，否则终端一片安静、看不出发生了什么
                 errors += 1
-                panel(f"请求异常: {e}")
+                panel(f"请求异常: {e}")          # 终端只看面板这一行动态刷新即可
                 if errors == 1 or time.time() >= next_err_note:
-                    log.warning("%s 提交请求异常（第 %d 次）: %s；放慢后继续", title, errors, e)
+                    log.info("抢课进度 %s 提交请求异常（第 %d 次）: %s；已退避重试",
+                             title, errors, e)
                     next_err_note = time.time() + 60
                 time.sleep(min(interval * (2 ** min(errors, 4)), 5.0))
                 continue
@@ -760,7 +761,7 @@ def grab_worker(cfg, uid, log, active):
                     db.mark_failed(uid, raw_title, wd, lv)
                     return
                 if refreshes >= MAX_CODE_REFRESHES:
-                    log.warning("%s 连续重新领码 %d 次仍被拒（%s）：不是凭证问题，是服务端真实拒绝"
+                    log.warning("抢课进度 %s 连续重新领码 %d 次仍被拒（%s）：不是凭证问题，是服务端真实拒绝"
                                 "（多半是名额缓存未刷新/批次未放号/资格限制），本轮放弃，下一轮再试",
                                 title, refreshes, last_msg)
                     return
@@ -773,7 +774,8 @@ def grab_worker(cfg, uid, log, active):
                 code = new_code
                 refreshes += 1
                 panel(f"凭证码失效，已换新码（第 {refreshes} 次）")
-                log.info("%s 凭证码已失效，已重新领取（第 %d 次），继续提交", title, refreshes)
+                # 终端只在面板那行刷新；日志文件留一条记录即可
+                log.info("抢课进度 %s 凭证码已失效，已重新领取（第 %d 次）", title, refreshes)
                 time.sleep(max(interval, 0.3))
                 continue
             panel(last_msg)                       # 终端面板原地刷新次数和最近返回
@@ -782,7 +784,7 @@ def grab_worker(cfg, uid, log, active):
                 next_note = time.time() + 60
             time.sleep(interval)
         if not submitted:
-            log.warning("%s 连续提交 %d 次仍未成功（其中请求异常 %d 次），交给下一轮扫描继续",
+            log.warning("抢课进度 %s 连续提交 %d 次仍未成功（其中请求异常 %d 次），交给下一轮扫描继续",
                         title, attempts, errors)
             return
 

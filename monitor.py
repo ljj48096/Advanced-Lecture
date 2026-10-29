@@ -33,7 +33,9 @@ CONFIG_PATH = "config.json"
 # 不标记失败、也不冷却——等有人退课释放名额后还能再抢。
 FULL_KEYWORDS = ("满",)
 # 其他终态错误（资格/人脸/重复报名等），标记失败后不再重试。
-TERMINAL_KEYWORDS = ("已报名", "存在", "不能", "无权", "人脸", "超过", "频繁", "无效时间")
+TERMINAL_KEYWORDS = ("已报名", "存在", "不能", "无权", "人脸", "超过", "无效时间")
+# 限流类提示：只放缓节奏，不算失败，更不能标记终态（否则一次限流就永久放弃这门课）
+RATE_LIMIT_KEYWORDS = ("频繁", "过快", "稍后", "冷却")
 
 # 「成功但没拿到凭证码」多半是已满，资格探测的判定结果缓存这么久再重探。
 # 注意：这只是资格探测的缓存，不影响抢课——抢课不做任何冷却，每轮都会尝试。
@@ -42,16 +44,62 @@ NO_CODE_TTL = 300
 # 单个抢课线程最长连续提交多久；超时后交给下一轮扫描重新起线程。
 GRAB_MAX_SECONDS = 180
 
-# uid -> 上次已提示的「已满」原因，避免同一门课每轮扫描都刷同一条日志
-_full_noted = {}
+# 日志去重：key -> 上次已提示的消息。同一条消息只打一次，内容变了才再打。
+_noted = {}
+_start_logged = {}   # uid -> 上次打印「开始抢课」的时间
+
+
+def note_once(key, log, msg):
+    """同一条消息只提示一次（状态变化后内容不同，会再次提示）。"""
+    if _noted.get(key) == msg:
+        return
+    _noted[key] = msg
+    log.info("%s", msg)
+
+
+def note_grab_start(uid, log, msg, gap=60):
+    """同一门课 60 秒内只打印一次「开始抢课」，避免每轮扫描刷屏。"""
+    now = time.time()
+    if now - _start_logged.get(uid, 0) < gap:
+        return
+    _start_logged[uid] = now
+    log.info("%s", msg)
 
 
 def note_full(uid, title, reason, log):
     """同一种「已满」原因只提示一次，原因变了再提示。"""
-    if _full_noted.get(uid) == reason:
+    note_once((uid, "full"), log, f"{title} {reason}，下一轮继续尝试")
+
+
+def bell():
+    """终端响一声，抢课成功时提醒。"""
+    try:
+        sys.stdout.write("\a")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def success_banner(log, title, wd_cn, sign_up_time, venue):
+    """抢课成功时打一个醒目的横幅，并响一声提示。"""
+    console_clear()
+    bell()
+    line = "=" * 56
+    log.info(line)
+    log.info("🎉 抢课成功：%s", title)
+    log.info("   星期：%s   报名时间：%s", wd_cn, sign_up_time)
+    log.info("   地点：%s", venue)
+    log.info("   继续监控其他符合条件课程")
+    log.info(line)
+
+
+def log_limit_progress(cfg, log):
+    """打印各级别「已抢/上限」，方便判断为什么某些课被跳过。"""
+    lim = cfg.get("class_level_limit") or {}
+    if not lim:
         return
-    _full_noted[uid] = reason
-    log.info("%s %s，下一轮继续尝试", title, reason)
+    parts = [f"{lv} {db.count_grabbed_by_level(lv)}/{n}" for lv, n in lim.items()]
+    log.info("级别限抢进度: %s", ", ".join(parts))
 
 
 def relax_console_encoding():
@@ -426,33 +474,50 @@ def fetch_matching(cfg, client, elig_cache, active):
 
 def notify_and_grab(cfg, client, lec, log, active):
     uid = lec["DataId"]
+    name = lec.get("Cathedra", "")
     wd = safe_weekday(lec.get("LectureTimeStart", ""))
-    if not wd:
-        return
     lv = lec.get("ClassLevelName") or ""
+    disp = with_level(name, lv)
+    if not wd:
+        note_once((uid, "wd"), log, f"{disp} 跳过：上课时间无法解析（{lec.get('LectureTimeStart')!r}）")
+        return
     remain = int(lec.get("Capacity") or 0) - int(lec.get("SignupNum") or 0)
     level_limit = cfg.get("class_level_limit") or {}
 
-    if db.is_grabbed(uid) or db.is_failed(uid):
+    if db.is_grabbed(uid):
+        return                                   # 已经抢到，无需提示
+    if db.is_failed(uid):
+        note_once((uid, "failed"), log, f"{disp} 跳过：之前已判定终态失败，不再重试"
+                                        f"（原因见当时的日志；确需重试删掉 course_status.db 里这一行）")
         return
-    if lec.get("LectureHallStatus") == 2:  # 已报满
+    if lec.get("LectureHallStatus") == 2:        # 已报满
         return
-
-    # 自动抢课：到达开放时间前后 lead 秒内启动抢课线程
     if remain <= 0:
+        note_once((uid, "norem"), log,
+                  f"{disp} 跳过：列表显示没有剩余名额（Capacity={lec.get('Capacity')}, "
+                  f"SignupNum={lec.get('SignupNum')}）")
         return
-    # 级别限抢数量：该级别已抢满则跳过
-    if level_limit and lv in level_limit and db.count_grabbed_by_level(lv) >= level_limit[lv]:
-        return
+    # 级别限抢数量：该级别已抢满则跳过（并明确告诉你为什么不动）
+    if level_limit and lv in level_limit:
+        got = db.count_grabbed_by_level(lv)
+        if got >= level_limit[lv]:
+            note_once((uid, "limit"), log,
+                      f"{disp} 跳过：{lv}已抢到 {got}/{level_limit[lv]} 门，达到 "
+                      f"class_level_limit 上限（改 config 可放开）")
+            return
     try:
         open_ts = parse_server_time(lec.get("TimeSigningUp", ""))
     except Exception:
+        note_once((uid, "ts"), log, f"{disp} 跳过：报名开放时间无法解析（{lec.get('TimeSigningUp')!r}）")
         return
     lead = cfg.get("grab_prepare_lead_seconds", 180)
     # 不做冷却：只要这门课还可抢（本轮列表里状态 1/3 且有余量），每轮扫描都会重新起线程尝试。
     # 正在抢课（线程还活着）时不重复起线程——那个线程本身就在按很短间隔反复提交。
     if client.server_now() >= open_ts - lead and uid not in active:
         active[uid] = True
+        note_grab_start(uid, log,
+                        f"🎯 开始抢课：{disp}（剩余 {remain} 个名额，每 "
+                        f"{cfg.get('grab_retry_interval', 0.5)}s 提交一次）")
         t = threading.Thread(target=grab_worker,
                              args=(cfg, uid, log, active), daemon=True)
         t.start()
@@ -487,7 +552,7 @@ def grab_worker(cfg, uid, log, active):
         if not code:
             note_full(uid, title, "未取得凭证码（已满或无资格）", log)
             return
-        _full_noted.pop(uid, None)      # 拿到凭证码，说明有余位，清掉「已满」提示记录
+        _noted.pop((uid, "full"), None)   # 拿到凭证码，说明有余位，清掉「已满」提示记录
 
         # 精确等到报名开放时间（服务器时钟）
         open_ts = parse_server_time(data.get("TimeSigningUp") or "")
@@ -523,6 +588,11 @@ def grab_worker(cfg, uid, log, active):
             last_msg = str(r.get("msg", r))
             if any(k in last_msg for k in ("未登录", "登录失效", "登录过期")):
                 raise SessionExpired(last_msg)
+            if any(k in last_msg for k in RATE_LIMIT_KEYWORDS):
+                # 被限流：只放缓，不算失败、更不能标记终态（否则一次限流就永久放弃这门课）
+                log.info("%s 被限流（%s），放慢后继续", title, last_msg)
+                time.sleep(max(interval, 2.0))
+                continue
             if any(k in last_msg for k in FULL_KEYWORDS):
                 # 提交时才发现已满：不标记失败、不冷却，当作「没有余位」的课程继续监控。
                 # 等有人退课释放名额，后续轮次还能再抢。
@@ -546,7 +616,8 @@ def grab_worker(cfg, uid, log, active):
             if state == 1:
                 db.mark_grabbed(uid, raw_title, wd, lv)
                 sign_up_time = (st.get("data") or {}).get("signUpTime", "")
-                log.info("🎉 %s 抢课成功！继续监控其他符合条件课程", title)
+                success_banner(log, title, weekday_cn(wd), sign_up_time, data.get("Venue"))
+                log_limit_progress(cfg, log)
                 try_send_email(cfg, log, f"[抢课成功] {title}",
                                f"【抢课成功】\n课程：{title}\n星期：{weekday_cn(wd)}\n"
                                f"报名时间：{sign_up_time}\n地点：{data.get('Venue')}")
@@ -609,10 +680,10 @@ def main():
              cfg.get("target_weekdays"), cfg.get("target_campus", ""),
              cfg.get("class_level_limit"), cfg.get("poll_interval", 5), jitter_text(cfg),
              float(cfg.get("grab_retry_interval", 0.5)))
+    log_limit_progress(cfg, log)
     active = {}
     elig_cache = {}
     poll = cfg.get("poll_interval", 5)
-    grab_interval = float(cfg.get("grab_retry_interval", 0.5))
     status = ""
     fails = 0
     while True:
@@ -622,6 +693,7 @@ def main():
             fails = 0
             status = (f"本轮扫描: 有余位={counts.get(1, 0)} 未开启={counts.get(3, 0)} "
                       f"已报满={counts.get(2, 0)} 可抢={len(lectures)} "
+                      f"抢课中={len(active)} "
                       f"已过滤={filtered_cond + filtered_elig}"
                       f"(条件{filtered_cond}/无资格{filtered_elig})")
             log.info("%s", status)   # 写日志文件（控制台被过滤掉）

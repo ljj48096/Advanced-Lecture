@@ -18,6 +18,7 @@ import logging
 import os
 import random
 import re
+import shutil
 import sys
 import threading
 import time
@@ -86,15 +87,15 @@ def bell():
 
 def success_banner(log, title, wd_cn, sign_up_time, venue):
     """抢课成功时打一个醒目的横幅，并响一声提示。"""
-    console_clear()
     bell()
     line = "=" * 56
-    log.info(line)
-    log.info("🎉 抢课成功：%s", title)
-    log.info("   星期：%s   报名时间：%s", wd_cn, sign_up_time)
-    log.info("   地点：%s", venue)
-    log.info("   继续监控其他符合条件课程")
-    log.info(line)
+    with dash_suspended:
+        log.info(line)
+        log.info("🎉 抢课成功：%s", title)
+        log.info("   星期：%s   报名时间：%s", wd_cn, sign_up_time)
+        log.info("   地点：%s", venue)
+        log.info("   继续监控其他符合条件课程")
+        log.info(line)
 
 
 def log_limit_progress(cfg, log):
@@ -127,38 +128,142 @@ def make_client(cfg):
     )
 
 
-class ConsoleFilter(logging.Filter):
-    """控制台过滤：排除「本轮扫描」这类原地更新的状态行，避免刷屏。"""
-
-    def filter(self, record):
-        return "本轮扫描" not in record.getMessage()
-
-
-_last_status_w = 0
-
-
 def _display_width(text):
     """终端显示宽度：中文/全角按 2 列算，避免状态行残留。"""
     return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
 
 
-def console_status(text):
-    """在控制台原地更新一行状态（覆盖上一次，不换行，只显示最新一条）。"""
-    global _last_status_w
-    width = _display_width(text)
-    pad = " " * max(0, _last_status_w - width)
-    sys.stdout.write("\r" + text + pad)
-    sys.stdout.flush()
-    _last_status_w = width
+def _fit(text, width):
+    """按终端显示宽度截断，避免长行折行导致面板行数算错。"""
+    if _display_width(text) <= width:
+        return text
+    out, w = [], 0
+    for ch in text:
+        cw = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        if w + cw > width - 1:
+            break
+        out.append(ch)
+        w += cw
+    return "".join(out) + "…"
 
 
-def console_clear(width=70):
-    """清掉原地状态行，避免日志和状态行挤在同一行。"""
-    global _last_status_w
-    n = max(width, _last_status_w)
-    sys.stdout.write("\r" + " " * n + "\r")
+def _term_width():
+    try:
+        return max(20, shutil.get_terminal_size((100, 20)).columns)
+    except Exception:
+        return 100
+
+
+# ---------- 控制台面板：第一行扫描统计 + 下方「正在抢的课」原地刷新 ----------
+# 日志照常在面板上方逐行打印；写日志前先擦掉面板，写完再重绘，面板始终贴在底部。
+
+_dash_lock = threading.RLock()
+_DASH = {"ok": None, "status": "", "grabs": {}, "drawn": 0, "suspended": False}
+
+
+def dash_ok():
+    """终端是否支持原地刷新的面板；不支持（如重定向到文件）就退回逐行输出。"""
+    if _DASH["ok"] is None:
+        try:
+            _DASH["ok"] = sys.stdout.isatty() and _enable_ansi()
+        except Exception:
+            _DASH["ok"] = False
+    return bool(_DASH["ok"])
+
+
+def _dash_render():
+    """擦掉旧面板后在原位重绘（调用方需持锁）。"""
+    if not dash_ok() or _DASH["suspended"]:
+        return
+    width = _term_width() - 1
+    lines = []
+    if _DASH["status"]:
+        lines.append(_fit(_DASH["status"], width))
+    for text in _DASH["grabs"].values():
+        lines.append(_fit(text, width))
+    buf = ""
+    if _DASH["drawn"]:
+        buf += f"\033[{_DASH['drawn']}A\r"      # 光标回到面板第一行
+    buf += "\033[J"                              # 清到屏幕末尾（不残留旧字符）
+    if lines:
+        buf += "\n".join(lines)
+    _DASH["drawn"] = len(lines)
+    sys.stdout.write(buf)
     sys.stdout.flush()
-    _last_status_w = 0
+
+
+def dash_erase():
+    """擦掉面板（写日志/打印横幅前调用）。"""
+    with _dash_lock:
+        if not dash_ok() or not _DASH["drawn"]:
+            return
+        sys.stdout.write(f"\033[{_DASH['drawn']}A\r\033[J")
+        sys.stdout.flush()
+        _DASH["drawn"] = 0
+
+
+def dash_status(text):
+    """更新面板第 1 行：本轮扫描统计。"""
+    with _dash_lock:
+        _DASH["status"] = text
+        _dash_render()
+
+
+def dash_grab(uid, text):
+    """更新面板中某门课的一行：已存在就原地改写次数，不再新开一行。"""
+    with _dash_lock:
+        _DASH["grabs"][uid] = text
+        _dash_render()
+
+
+def dash_grab_done(uid):
+    """抢课线程结束，移除该行。"""
+    with _dash_lock:
+        _DASH["grabs"].pop(uid, None)
+        _dash_render()
+
+
+class _DashSuspend:
+    """打印横幅等多行内容时暂停面板，结束后重绘。"""
+
+    def __enter__(self):
+        dash_erase()
+        with _dash_lock:
+            _DASH["suspended"] = True
+        return self
+
+    def __exit__(self, *exc):
+        with _dash_lock:
+            _DASH["suspended"] = False
+            _dash_render()
+        return False
+
+
+dash_suspended = _DashSuspend()
+
+
+class ConsoleFilter(logging.Filter):
+    """面板里已经显示的内容（本轮扫描 / 抢课进度）不再逐行刷到终端。"""
+
+    QUIET = ("本轮扫描", "抢课进度")
+
+    def filter(self, record):
+        if not dash_ok():            # 非终端（重定向到文件）照常输出
+            return True
+        msg = record.getMessage()
+        return not any(k in msg for k in self.QUIET)
+
+
+class ConsoleLogHandler(logging.StreamHandler):
+    """写日志前擦掉面板、写完重绘，避免日志和面板挤在同一行。"""
+
+    def emit(self, record):
+        with _dash_lock:          # 整段持锁：防止别的线程在擦除和写日志之间插进来重绘
+            dash_erase()
+            try:
+                super().emit(record)
+            finally:
+                _dash_render()
 
 
 # ---------- 控制台彩色日志（只影响终端，文件日志保持纯文本）----------
@@ -244,7 +349,7 @@ def setup_logging(log_path):
         fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%Y-%m-%d %H:%M:%S")
         fh = logging.FileHandler(log_path, encoding="utf-8")
         fh.setFormatter(fmt)
-        sh = logging.StreamHandler()
+        sh = ConsoleLogHandler()
         sh.setFormatter(ConsoleFormatter("%(asctime)s [%(levelname)s] %(message)s",
                                          "%Y-%m-%d %H:%M:%S"))
         sh.addFilter(ConsoleFilter())
@@ -318,24 +423,24 @@ def jitter_text(cfg):
 
 
 def spin_sleep(seconds, status=""):
-    """睡眠 seconds 秒，期间在状态行末尾显示转圈动画，表示程序仍在运行。"""
+    """睡眠 seconds 秒，期间在面板第一行末尾显示转圈动画，表示程序仍在运行。"""
     frames = "|/-\\"
     end = time.time() + seconds
     i = 0
     while time.time() < end:
-        console_status(f"{status} {frames[i % 4]}")
+        dash_status(f"{status} {frames[i % 4]}" if status else frames[i % 4])
         time.sleep(0.2)
         i += 1
 
 
 def warn_banner(log, title, lines):
     """打印醒目的多行警告横幅。"""
-    console_clear()
-    log.warning("!" * 60)
-    log.warning("!! %s", title)
-    for ln in lines:
-        log.warning("!! %s", ln)
-    log.warning("!" * 60)
+    with dash_suspended:
+        log.warning("!" * 60)
+        log.warning("!! %s", title)
+        for ln in lines:
+            log.warning("!! %s", ln)
+        log.warning("!" * 60)
 
 
 def is_weekday_match(wd, rule):
@@ -522,6 +627,7 @@ def notify_and_grab(cfg, client, lec, log, active):
         note_grab_start(uid, log,
                         f"🎯 开始抢课：{disp}（剩余 {remain} 个名额，每 "
                         f"{cfg.get('grab_retry_interval', 0.5)}s 提交一次）")
+        dash_grab(uid, f"🎯 {disp} 启动抢课（剩余 {remain} 个名额）")
         t = threading.Thread(target=grab_worker,
                              args=(cfg, uid, log, active), daemon=True)
         t.start()
@@ -560,10 +666,12 @@ def grab_worker(cfg, uid, log, active):
 
         # 精确等到报名开放时间（服务器时钟）
         open_ts = parse_server_time(data.get("TimeSigningUp") or "")
+        dash_grab(uid, f"⏳ {title} 已领到凭证码，等待开放")
         while True:
             remain = open_ts - client.server_now()
             if remain <= 0:
                 break
+            dash_grab(uid, f"⏳ {title} 等待开放 {remain:.0f}s")
             if remain > 3:
                 time.sleep(min(1.0, remain - 2.5))
             else:
@@ -586,8 +694,16 @@ def grab_worker(cfg, uid, log, active):
         submitted = False
         refreshes = 0
         errors = 0
-        next_note = time.time() + 15
+        next_note = time.time() + 60
         next_err_note = time.time() + 15
+
+        def panel(note="", n=None):
+            """只更新面板里这门课的那一行，不新增日志行。"""
+            msg = f"🎯 {title} 已提交 {attempts if n is None else n} 次"
+            if note:
+                msg += f" · {_fit(note, 36)}"
+            dash_grab(uid, msg)
+
         while time.time() < deadline:
             attempts += 1
             last_msg = ""
@@ -598,9 +714,10 @@ def grab_worker(cfg, uid, log, active):
             except Exception as e:
                 # 提交接口偶发超时/断连：不要静默重试，否则终端一片安静、看不出发生了什么
                 errors += 1
-                if errors in (1, 3) or time.time() >= next_err_note:
+                panel(f"请求异常: {e}")
+                if errors == 1 or time.time() >= next_err_note:
                     log.warning("%s 提交请求异常（第 %d 次）: %s；放慢后继续", title, errors, e)
-                    next_err_note = time.time() + 15
+                    next_err_note = time.time() + 60
                 time.sleep(min(interval * (2 ** min(errors, 4)), 5.0))
                 continue
             if r.get("state") == "success":
@@ -611,6 +728,7 @@ def grab_worker(cfg, uid, log, active):
                 raise SessionExpired(last_msg)
             if any(k in last_msg for k in RATE_LIMIT_KEYWORDS):
                 # 被限流：只放缓，不算失败、更不能标记终态（否则一次限流就永久放弃这门课）
+                panel("被限流，放慢后继续")
                 log.info("%s 被限流（%s），放慢后继续", title, last_msg)
                 time.sleep(max(interval, 2.0))
                 continue
@@ -647,12 +765,14 @@ def grab_worker(cfg, uid, log, active):
                     return
                 code = new_code
                 refreshes += 1
+                panel(f"凭证码失效，已换新码（第 {refreshes} 次）")
                 log.info("%s 凭证码已失效，已重新领取（第 %d 次），继续提交", title, refreshes)
                 time.sleep(max(interval, 0.3))
                 continue
-            if time.time() >= next_note:
-                log.info("%s 仍在抢（已提交 %d 次，最近返回: %s）", title, attempts, last_msg)
-                next_note = time.time() + 15
+            panel(last_msg)                       # 终端面板原地刷新次数和最近返回
+            if time.time() >= next_note:          # 进度只写日志文件（控制台已被上面那行取代）
+                log.info("抢课进度 %s 已提交 %d 次，最近返回: %s", title, attempts, last_msg)
+                next_note = time.time() + 60
             time.sleep(interval)
         if not submitted:
             log.warning("%s 连续提交 %d 次仍未成功（其中请求异常 %d 次），交给下一轮扫描继续",
@@ -677,6 +797,7 @@ def grab_worker(cfg, uid, log, active):
         log.error("[%s] 抢课异常: %s", uid, e)
     finally:
         active.pop(uid, None)
+        dash_grab_done(uid)
 
 
 def main():
@@ -740,20 +861,18 @@ def main():
                       f"已过滤={filtered_cond + filtered_elig}"
                       f"(条件{filtered_cond}/无资格{filtered_elig})")
             log.info("%s", status)   # 写日志文件（控制台被过滤掉）
-            console_status(status)   # 控制台原地刷新，只显示最新一条
+            dash_status(status)      # 控制台面板第一行，原地刷新
             # 只要本轮列表里还有可抢的课，就都为它们发一次抢课请求（无冷却）。
             # 抢课线程内部按 grab_retry_interval（默认 0.5s）连续提交，直到没余位。
             for lec in lectures:
                 notify_and_grab(cfg, client, lec, log, active)
         except SessionExpired as e:
-            console_clear()
             log.error("会话失效: %s", e)
             log.error("请重新抓 Cookie 更新 config.json 后重启程序")
             sys.exit(2)
         except Exception as e:
             # 网络抖动（超时/SSL 握手超时）已由客户端自动重试 2 次，走到这里说明仍失败
             fails += 1
-            console_clear()
             log.error("本轮异常(继续下一轮): %s （连续失败 %d 轮）", e, fails)
             if fails in (5, 20):
                 warn_banner(log, "连续多轮请求失败，请检查网络", [

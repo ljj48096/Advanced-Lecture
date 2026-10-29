@@ -6,7 +6,7 @@
   - 不匹配筛选条件、或无报名资格的课程不计入统计，只汇总到「已过滤」
   - 到达报名开放时间(TimeSigningUp, 以服务器时钟为准) -> 自动抢课
   - 不做冷却：只要课程还可抢，每轮扫描都会重新发一次抢课请求
-  - 出现有余位的课 -> 扫描间隔切到 fast_poll_interval(默认 0.5s)，直到没余位
+  - 抢课线程内每 grab_retry_interval(默认 0.5s) 提交一次，直到抢到/没余位/终态失败
   - 抢课成功 -> 发邮件通知，并停止监控该课程，继续监控其余课程
   - 提交时发现已报满 -> 当作「没有余位」继续监控，不标记失败
 状态持久化到 SQLite (course_status.db)，日志写入 monitor.log。
@@ -39,11 +39,10 @@ TERMINAL_KEYWORDS = ("已报名", "存在", "不能", "无权", "人脸", "超�
 # 注意：这只是资格探测的缓存，不影响抢课——抢课不做任何冷却，每轮都会尝试。
 NO_CODE_TTL = 300
 
-# 详情确认已满后，多少秒内不再据此进入「快速抢课模式」。
-# 只管扫描频率，不管抢课：这门课下一轮照样会再发一次抢课请求。
-FULL_NOTE_TTL = 30
+# 单个抢课线程最长连续提交多久；超时后交给下一轮扫描重新起线程。
+GRAB_MAX_SECONDS = 180
 
-# uid -> 上次已提示的「已满」原因，避免快速模式下同一门课每轮刷同一条日志
+# uid -> 上次已提示的「已满」原因，避免同一门课每轮扫描都刷同一条日志
 _full_noted = {}
 
 
@@ -425,19 +424,7 @@ def fetch_matching(cfg, client, elig_cache, active):
     return list(selected.values()), counts, filtered_cond, filtered_elig
 
 
-def needs_fast_mode(lectures, full_seen):
-    """快速抢课模式判定：只要还有「列表显示有余位、但详情尚未确认已满」的课，就尽快再扫一轮。"""
-    now = time.time()
-    for lec in lectures:
-        if lec.get("LectureHallStatus") != 1:      # 只看有余位(1)的课
-            continue
-        ts = full_seen.get(lec["DataId"])
-        if ts is None or now - ts > FULL_NOTE_TTL:
-            return True
-    return False
-
-
-def notify_and_grab(cfg, client, lec, log, active, full_seen):
+def notify_and_grab(cfg, client, lec, log, active):
     uid = lec["DataId"]
     wd = safe_weekday(lec.get("LectureTimeStart", ""))
     if not wd:
@@ -467,11 +454,11 @@ def notify_and_grab(cfg, client, lec, log, active, full_seen):
     if client.server_now() >= open_ts - lead and uid not in active:
         active[uid] = True
         t = threading.Thread(target=grab_worker,
-                             args=(cfg, uid, log, active, full_seen), daemon=True)
+                             args=(cfg, uid, log, active), daemon=True)
         t.start()
 
 
-def grab_worker(cfg, uid, log, active, full_seen):
+def grab_worker(cfg, uid, log, active):
     """单门课程完整抢课流程（独立 client + 服务器时钟精确等待）。"""
     client = make_client(cfg)
     try:
@@ -489,7 +476,6 @@ def grab_worker(cfg, uid, log, active, full_seen):
             db.mark_grabbed(uid, raw_title, wd, lv)
             return
         if data.get("LectureHallStatus") == 2:
-            full_seen[uid] = time.time()
             note_full(uid, title, "已报满（列表数据有延迟）", log)
             return
 
@@ -499,7 +485,6 @@ def grab_worker(cfg, uid, log, active, full_seen):
             return
         code = (sc.get("data") or {}).get("code")
         if not code:
-            full_seen[uid] = time.time()
             note_full(uid, title, "未取得凭证码（已满或无资格）", log)
             return
         _full_noted.pop(uid, None)      # 拿到凭证码，说明有余位，清掉「已满」提示记录
@@ -516,33 +501,43 @@ def grab_worker(cfg, uid, log, active, full_seen):
                 time.sleep(0.05)
         log.info("%s 到点，提交报名", title)
 
+        # 抢课循环：每隔 grab_retry_interval 秒发一次报名请求，直到抢到 / 没余位 / 终态失败
+        interval = float(cfg.get("grab_retry_interval", 0.5))
+        deadline = time.time() + GRAB_MAX_SECONDS
+        attempts = 0
         submitted = False
-        for i in range(200):
+        next_note = time.time() + 15
+        while time.time() < deadline:
+            attempts += 1
+            last_msg = ""
             try:
                 r = client.signup(code)
             except SessionExpired:
                 raise
             except Exception:
-                time.sleep(0.35)
+                time.sleep(interval)
                 continue
             if r.get("state") == "success":
                 submitted = True
                 break
-            msg = str(r.get("msg", r))
-            if any(k in msg for k in ("未登录", "登录失效", "登录过期")):
-                raise SessionExpired(msg)
-            if any(k in msg for k in FULL_KEYWORDS):
+            last_msg = str(r.get("msg", r))
+            if any(k in last_msg for k in ("未登录", "登录失效", "登录过期")):
+                raise SessionExpired(last_msg)
+            if any(k in last_msg for k in FULL_KEYWORDS):
                 # 提交时才发现已满：不标记失败、不冷却，当作「没有余位」的课程继续监控。
                 # 等有人退课释放名额，后续轮次还能再抢。
-                log.info("%s 提交时已满，继续监控余位", title)
+                log.info("%s 提交时已满（第 %d 次），等余位后继续", title, attempts)
                 return
-            if any(k in msg for k in TERMINAL_KEYWORDS):
-                log.info("%s 报名失败(终态): %s", title, msg)
+            if any(k in last_msg for k in TERMINAL_KEYWORDS):
+                log.info("%s 报名失败(终态): %s", title, last_msg)
                 db.mark_failed(uid, raw_title, wd, lv)
                 return
-            time.sleep(0.35)
+            if time.time() >= next_note:
+                log.info("%s 仍在抢（已提交 %d 次，最近返回: %s）", title, attempts, last_msg)
+                next_note = time.time() + 15
+            time.sleep(interval)
         if not submitted:
-            log.error("%s 重试后仍失败", title)
+            log.warning("%s 连续提交 %d 次仍未成功，交给下一轮扫描继续", title, attempts)
             return
 
         for _ in range(20):
@@ -610,15 +605,14 @@ def main():
         ])
         sys.exit(2)
 
-    log.info("开始监控: target_weekdays=%s, target_campus=%s, class_level_limit=%s, 轮询间隔=%ss(%s)",
+    log.info("开始监控: target_weekdays=%s, target_campus=%s, class_level_limit=%s, 扫描间隔=%ss(%s), 抢课提交间隔=%ss",
              cfg.get("target_weekdays"), cfg.get("target_campus", ""),
-             cfg.get("class_level_limit"), cfg.get("poll_interval", 5), jitter_text(cfg))
+             cfg.get("class_level_limit"), cfg.get("poll_interval", 5), jitter_text(cfg),
+             float(cfg.get("grab_retry_interval", 0.5)))
     active = {}
-    full_seen = {}
     elig_cache = {}
     poll = cfg.get("poll_interval", 5)
-    fast = float(cfg.get("fast_poll_interval", 0.5))
-    fast_mode = False
+    grab_interval = float(cfg.get("grab_retry_interval", 0.5))
     status = ""
     fails = 0
     while True:
@@ -632,17 +626,10 @@ def main():
                       f"(条件{filtered_cond}/无资格{filtered_elig})")
             log.info("%s", status)   # 写日志文件（控制台被过滤掉）
             console_status(status)   # 控制台原地刷新，只显示最新一条
-            # 只要本轮列表里还有可抢的课，就都为它们发一次抢课请求（无冷却）
+            # 只要本轮列表里还有可抢的课，就都为它们发一次抢课请求（无冷却）。
+            # 抢课线程内部按 grab_retry_interval（默认 0.5s）连续提交，直到没余位。
             for lec in lectures:
-                notify_and_grab(cfg, client, lec, log, active, full_seen)
-
-            # 有余位 -> 切到快速模式，间隔缩到 fast_poll_interval，直到没余位
-            want_fast = needs_fast_mode(lectures, full_seen)
-            if want_fast and not fast_mode:
-                log.info("⚡ 出现有余位的课，进入快速抢课模式：每 %ss 扫描一次，直到没有余位", fast)
-            elif fast_mode and not want_fast:
-                log.info("已无余位，恢复正常轮询（%ss + 抖动）", poll)
-            fast_mode = want_fast
+                notify_and_grab(cfg, client, lec, log, active)
         except SessionExpired as e:
             console_clear()
             log.error("会话失效: %s", e)
@@ -661,9 +648,6 @@ def main():
                     "   （本程序默认直连，不读 HTTP(S)_PROXY 环境变量）；",
                     "3) 若必须走代理，启动前设置 GDJT_USE_ENV_PROXY=1。",
                 ])
-        if fast_mode:
-            # 快速抢课：不加抖动，尽量快地进入下一轮
-            spin_sleep(fast, status)
-        else:
-            # 正常轮询：间隔 + 可配置随机抖动（默认 1~3 秒）
-            spin_sleep(poll + random_jitter(cfg), status)
+        # 扫描间隔保持不变（poll_interval + 可选抖动）；
+        # 「每 grab_retry_interval 秒发一次抢课请求」由抢课线程负责，与扫描频率无关。
+        spin_sleep(poll + random_jitter(cfg), status)

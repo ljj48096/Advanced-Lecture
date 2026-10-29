@@ -585,7 +585,9 @@ def grab_worker(cfg, uid, log, active):
         attempts = 0
         submitted = False
         refreshes = 0
+        errors = 0
         next_note = time.time() + 15
+        next_err_note = time.time() + 15
         while time.time() < deadline:
             attempts += 1
             last_msg = ""
@@ -593,8 +595,13 @@ def grab_worker(cfg, uid, log, active):
                 r = client.signup(code)
             except SessionExpired:
                 raise
-            except Exception:
-                time.sleep(interval)
+            except Exception as e:
+                # 提交接口偶发超时/断连：不要静默重试，否则终端一片安静、看不出发生了什么
+                errors += 1
+                if errors in (1, 3) or time.time() >= next_err_note:
+                    log.warning("%s 提交请求异常（第 %d 次）: %s；放慢后继续", title, errors, e)
+                    next_err_note = time.time() + 15
+                time.sleep(min(interval * (2 ** min(errors, 4)), 5.0))
                 continue
             if r.get("state") == "success":
                 submitted = True
@@ -648,7 +655,8 @@ def grab_worker(cfg, uid, log, active):
                 next_note = time.time() + 15
             time.sleep(interval)
         if not submitted:
-            log.warning("%s 连续提交 %d 次仍未成功，交给下一轮扫描继续", title, attempts)
+            log.warning("%s 连续提交 %d 次仍未成功（其中请求异常 %d 次），交给下一轮扫描继续",
+                        title, attempts, errors)
             return
 
         for _ in range(20):

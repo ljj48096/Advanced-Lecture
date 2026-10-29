@@ -36,6 +36,10 @@ FULL_KEYWORDS = ("满",)
 TERMINAL_KEYWORDS = ("已报名", "存在", "不能", "无权", "人脸", "超过", "无效时间")
 # 限流类提示：只放缓节奏，不算失败，更不能标记终态（否则一次限流就永久放弃这门课）
 RATE_LIMIT_KEYWORDS = ("频繁", "过快", "稍后", "冷却")
+# 凭证码失效类提示：服务端让你「重新进入详情页」= SetCredentials 重新领码。
+# 复用同一个 code 会一直被拒，必须换新码再提交。
+CODE_INVALID_KEYWORDS = ("重新进入详情页", "重新进入", "刷新页面", "重新获取", "凭证")
+MAX_CODE_REFRESHES = 4     # 连续重新领码这么多次仍被拒，说明是服务端真实拒绝，本轮放弃
 
 # 「成功但没拿到凭证码」多半是已满，资格探测的判定结果缓存这么久再重探。
 # 注意：这只是资格探测的缓存，不影响抢课——抢课不做任何冷却，每轮都会尝试。
@@ -566,11 +570,21 @@ def grab_worker(cfg, uid, log, active):
                 time.sleep(0.05)
         log.info("%s 到点，提交报名", title)
 
+        def finish_success(sign_up_time=""):
+            """报名成功后的收尾：落库、横幅、发邮件。"""
+            db.mark_grabbed(uid, raw_title, wd, lv)
+            success_banner(log, title, weekday_cn(wd), sign_up_time, data.get("Venue"))
+            log_limit_progress(cfg, log)
+            try_send_email(cfg, log, f"[抢课成功] {title}",
+                           f"【抢课成功】\n课程：{title}\n星期：{weekday_cn(wd)}\n"
+                           f"报名时间：{sign_up_time}\n地点：{data.get('Venue')}")
+
         # 抢课循环：每隔 grab_retry_interval 秒发一次报名请求，直到抢到 / 没余位 / 终态失败
         interval = float(cfg.get("grab_retry_interval", 0.5))
         deadline = time.time() + GRAB_MAX_SECONDS
         attempts = 0
         submitted = False
+        refreshes = 0
         next_note = time.time() + 15
         while time.time() < deadline:
             attempts += 1
@@ -602,6 +616,33 @@ def grab_worker(cfg, uid, log, active):
                 log.info("%s 报名失败(终态): %s", title, last_msg)
                 db.mark_failed(uid, raw_title, wd, lv)
                 return
+            if any(k in last_msg for k in CODE_INVALID_KEYWORDS):
+                # 「报名失败！请重新进入详情页」= 凭证码失效（只能用一次/已过期）。
+                # 先查一下服务端到底有没有记上这次报名，再重新领一张码继续提交。
+                sdata = (client.get_signin_time(uid).get("data") or {})
+                if sdata.get("state") == 1:
+                    finish_success(sdata.get("signUpTime", ""))
+                    return
+                if sdata.get("state") == -1:
+                    log.info("%s 服务端确认报名失败", title)
+                    db.mark_failed(uid, raw_title, wd, lv)
+                    return
+                if refreshes >= MAX_CODE_REFRESHES:
+                    log.warning("%s 连续重新领码 %d 次仍被拒（%s）：不是凭证问题，是服务端真实拒绝"
+                                "（多半是名额缓存未刷新/批次未放号/资格限制），本轮放弃，下一轮再试",
+                                title, refreshes, last_msg)
+                    return
+                refreshed = client.set_credentials(uid)
+                new_code = (refreshed.get("data") or {}).get("code")
+                if refreshed.get("state") != "success" or not new_code:
+                    note_full(uid, title,
+                              f"重新领码失败（{refreshed.get('msg', '无凭证码')}）", log)
+                    return
+                code = new_code
+                refreshes += 1
+                log.info("%s 凭证码已失效，已重新领取（第 %d 次），继续提交", title, refreshes)
+                time.sleep(max(interval, 0.3))
+                continue
             if time.time() >= next_note:
                 log.info("%s 仍在抢（已提交 %d 次，最近返回: %s）", title, attempts, last_msg)
                 next_note = time.time() + 15
@@ -614,13 +655,7 @@ def grab_worker(cfg, uid, log, active):
             st = client.get_signin_time(uid)
             state = (st.get("data") or {}).get("state")
             if state == 1:
-                db.mark_grabbed(uid, raw_title, wd, lv)
-                sign_up_time = (st.get("data") or {}).get("signUpTime", "")
-                success_banner(log, title, weekday_cn(wd), sign_up_time, data.get("Venue"))
-                log_limit_progress(cfg, log)
-                try_send_email(cfg, log, f"[抢课成功] {title}",
-                               f"【抢课成功】\n课程：{title}\n星期：{weekday_cn(wd)}\n"
-                               f"报名时间：{sign_up_time}\n地点：{data.get('Venue')}")
+                finish_success((st.get("data") or {}).get("signUpTime", ""))
                 return
             if state == -1:
                 log.info("%s 服务端确认失败", title)

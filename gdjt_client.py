@@ -41,6 +41,20 @@ class SessionExpired(Exception):
     """会话失效 (Cookie 过期), 需要重新抓包获取"""
 
 
+class HttpError(Exception):
+    """非 401/403 的 HTTP 错误。带上状态码和响应体片段，否则只剩一句 'HTTP Error 500'。
+
+    500 表示服务端处理请求时抛了未捕获异常（平台侧问题），不是参数错误。
+    """
+
+    def __init__(self, code: int, body: bytes = b"", url: str = ""):
+        self.code = code
+        self.body = body
+        snippet = body.decode("utf-8", "replace")
+        snippet = " ".join(snippet.split())[:200]
+        super().__init__(f"HTTP {code} {snippet}".strip() + (f" ({url})" if url else ""))
+
+
 class GdjtClient:
     def __init__(self, session_id: str, weixin_code_id: str = "", ua: str = DEFAULT_UA, timeout: int = 10):
         """
@@ -114,7 +128,7 @@ class GdjtClient:
                 if e.code in (401, 403):
                     raise SessionExpired(f"HTTP {e.code}: {body!r}") from e
                 if e.code < 500 or attempt >= retries:   # 4xx 不重试；5xx 可重试
-                    raise
+                    raise HttpError(e.code, body, url) from e
             except (urllib.error.URLError, TimeoutError, OSError):
                 if attempt >= retries:
                     raise

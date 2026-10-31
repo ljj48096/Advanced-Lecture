@@ -70,10 +70,18 @@ def main():
             det = client.get_lecture_detail(rows3[0]["DataId"])
             open_ts = (det.get("data") or {}).get("TimeSigningUp")
             if open_ts and GdjtClient._parse_server_time(open_ts) > client.server_now():
-                resp = client.signup(code)
-                ok2 = resp.get("state") != "success"  # 未到时间，应失败
-                check("提交报名接口(开放前安全测试)", ok2,
-                      f"返回 state={resp.get('state')} msg={resp.get('msg')}（应为'未到时间'类错误）")
+                try:
+                    resp = client.signup(code)
+                except Exception as ex:
+                    # 接口本身报错（HTTP 500 / 超时）不是脚本问题：服务端处理请求时挂了
+                    check("提交报名接口(开放前安全测试)", False, f"请求失败: {ex}")
+                    print("        └ 这是服务端错误（500=后端未捕获异常，超时=接口挂住），"
+                          "与你的资格/参数无关；若只这一项失败，其它接口正常即可正常监控")
+                else:
+                    ok2 = resp.get("state") != "success"  # 未到时间，应失败
+                    check("提交报名接口(开放前安全测试)", ok2,
+                          f"返回 state={resp.get('state')} msg={resp.get('msg')}"
+                          "（应为'未到时间'类错误）")
     else:
         print("  [跳过] 提交报名接口：当前无「未开启报名」的课，暂无法安全测通")
 

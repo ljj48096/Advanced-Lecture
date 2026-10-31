@@ -85,14 +85,15 @@ def bell():
         pass
 
 
-def success_banner(log, title, wd_cn, sign_up_time, venue):
+def success_banner(log, title, wd_cn, class_time, sign_up_time, venue):
     """抢课成功时打一个醒目的横幅，并响一声提示。"""
     bell()
     line = "=" * 56
     with dash_suspended:
         log.info(line)
         log.info("🎉 抢课成功：%s", title)
-        log.info("   星期：%s   报名时间：%s", wd_cn, sign_up_time)
+        log.info("   上课时间：%s（%s）", class_time, wd_cn)
+        log.info("   报名时间：%s", sign_up_time)
         log.info("   地点：%s", venue)
         log.info("   继续监控其他符合条件课程")
         log.info(line)
@@ -371,6 +372,38 @@ def safe_weekday(s):
         return datetime.fromisoformat(s.strip()).weekday() + 1
     except Exception:
         return 0
+
+
+def parse_dt(s):
+    """解析接口时间字符串；兼容 7 位微秒（python 最多 6 位）。失败返回 None。"""
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        try:
+            return datetime.fromisoformat(s[:26] + s[27:] if len(s) > 26 else s)
+        except ValueError:
+            return None
+
+
+def format_class_time(start, end):
+    """上课时间：'2026-10-30T18:25:00' + '...T19:30:00' -> '2026-10-30 18:25-19:30'
+
+    跨天则保留完整日期；解析失败时退回原始字符串，保证邮件里总有内容。
+    """
+    s = parse_dt(start)
+    if not s:
+        return (start or "").strip()
+    txt = s.strftime("%Y-%m-%d %H:%M")
+    e = parse_dt(end)
+    if e:
+        if e.date() == s.date():
+            txt += "-" + e.strftime("%H:%M")
+        else:
+            txt += " ~ " + e.strftime("%Y-%m-%d %H:%M")
+    return txt
 
 
 def weekday_cn(wd):
@@ -685,13 +718,16 @@ def grab_worker(cfg, uid, log, active):
                 time.sleep(0.05)
         log.info("%s 到点，提交报名", title)
 
+        class_time = format_class_time(data.get("LectureTimeStart"), data.get("LectureTimeEnd"))
+
         def finish_success(sign_up_time=""):
             """报名成功后的收尾：落库、横幅、发邮件。"""
             db.mark_grabbed(uid, raw_title, wd, lv)
-            success_banner(log, title, weekday_cn(wd), sign_up_time, data.get("Venue"))
+            success_banner(log, title, weekday_cn(wd), class_time, sign_up_time, data.get("Venue"))
             log_limit_progress(cfg, log)
             try_send_email(cfg, log, f"[抢课成功] {title}",
-                           f"【抢课成功】\n课程：{title}\n星期：{weekday_cn(wd)}\n"
+                           f"【抢课成功】\n课程：{title}\n"
+                           f"上课时间：{class_time}（{weekday_cn(wd)}）\n"
                            f"报名时间：{sign_up_time}\n地点：{data.get('Venue')}")
 
         # 抢课循环：每隔 grab_retry_interval 秒发一次报名请求，直到抢到 / 没余位 / 终态失败

@@ -11,6 +11,7 @@
     "max": 3
   },
   "grab_retry_interval": 0.5,
+  "startup_retry_interval": 60,
   "target_weekdays": "all",
   "target_campus": "四平路校区",
   "class_level_limit": {

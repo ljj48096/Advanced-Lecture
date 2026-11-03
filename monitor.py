@@ -49,6 +49,9 @@ NO_CODE_TTL = 300
 # 单个抢课线程最长连续提交多久；超时后交给下一轮扫描重新起线程。
 GRAB_MAX_SECONDS = 180
 
+# 启动时会话检查遇到服务端 5xx / 网络异常时的重试间隔（可用 config 的 startup_retry_interval 覆盖）。
+STARTUP_RETRY_SECONDS = 60
+
 # 日志去重：key -> 上次已提示的消息。同一条消息只打一次，内容变了才再打。
 _noted = {}
 _start_logged = {}   # uid -> 上次打印「开始抢课」的时间
@@ -862,28 +865,46 @@ def main():
         sys.exit(2)
 
     client = make_client(cfg)
-    try:
-        d = client.get_lecture_list(page=1, page_size=1, status=0)
-        if d.get("state") != "success":
+    retry_gap = float(cfg.get("startup_retry_interval") or STARTUP_RETRY_SECONDS)
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            d = client.get_lecture_list(page=1, page_size=1, status=0)
+            if d.get("state") != "success":
+                warn_banner(log, "登录 Cookie 无效或已过期！", [
+                    f"接口返回: {d.get('msg', d)}",
+                    "请按 README「第 1 步」重新抓取 Cookie 更新 config.json 后重启。",
+                    "可先运行: python selftest.py 自检链路。",
+                ])
+                sys.exit(2)
+            if not client.is_finish_face():
+                warn_banner(log, "未完成人脸采集！", [
+                    "报名前需在微信里完成人脸采集，否则无法报名。",
+                ])
+                sys.exit(3)
+            log.info("✓ 会话有效，服务器时钟偏差 %.3fs", client.server_offset)
+            break
+        except SessionExpired as e:
             warn_banner(log, "登录 Cookie 无效或已过期！", [
-                f"接口返回: {d.get('msg', d)}",
+                f"异常: {e}",
                 "请按 README「第 1 步」重新抓取 Cookie 更新 config.json 后重启。",
                 "可先运行: python selftest.py 自检链路。",
             ])
             sys.exit(2)
-        if not client.is_finish_face():
-            warn_banner(log, "未完成人脸采集！", [
-                "报名前需在微信里完成人脸采集，否则无法报名。",
-            ])
-            sys.exit(3)
-        log.info("✓ 会话有效，服务器时钟偏差 %.3fs", client.server_offset)
-    except SessionExpired as e:
-        warn_banner(log, "登录 Cookie 无效或已过期！", [
-            f"异常: {e}",
-            "请按 README「第 1 步」重新抓取 Cookie 更新 config.json 后重启。",
-            "可先运行: python selftest.py 自检链路。",
-        ])
-        sys.exit(2)
+        except Exception as e:
+            # 服务端 5xx / 网络抖动：平台侧故障，重试就可能恢复，不退出。
+            # 只有 Cookie 失效（SessionExpired / 接口明确返回失败）才停止。
+            if attempt == 1:
+                warn_banner(log, "启动检查失败（服务端 5xx / 网络异常），将自动重试", [
+                    f"异常: {e}",
+                    f"每隔 {retry_gap:.0f} 秒重试一次，成功后自动继续监控；Ctrl+C 可退出。",
+                    "若是 Cookie 失效，重试时接口会明确报错并提示重新抓取。",
+                ])
+            else:
+                log.warning("启动检查仍失败（第 %d 次）：%s；%.0f 秒后再试",
+                            attempt, e, retry_gap)
+            time.sleep(retry_gap)
 
     log.info("开始监控: target_weekdays=%s, target_campus=%s, class_level_limit=%s, 扫描间隔=%ss(%s), 抢课提交间隔=%ss",
              cfg.get("target_weekdays"), cfg.get("target_campus", ""),

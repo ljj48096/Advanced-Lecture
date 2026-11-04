@@ -56,13 +56,16 @@ class HttpError(Exception):
 
 
 class GdjtClient:
-    def __init__(self, session_id: str, weixin_code_id: str = "", ua: str = DEFAULT_UA, timeout: int = 10):
+    def __init__(self, session_id: str, weixin_code_id: str = "", ua: str = DEFAULT_UA, timeout: int = 10,
+                 token: str = ""):
         """
         :param session_id:    Cookie 中的 PG.ASP.Session.ID
         :param weixin_code_id: Cookie 中的 PG.ASP.WeiXinCode.ID (可为空)
+        :param token:         新版前端在每次接口请求里带的 token 头（抓包可得，可为空）
         """
         self.session_id = session_id.strip()
         self.weixin_code_id = (weixin_code_id or "").strip()
+        self.token = (token or "").strip()
         self.ua = ua
         self.timeout = timeout
         self.server_offset = 0.0  # 服务器时间 - 本地时间 (秒), 用于校时
@@ -73,6 +76,8 @@ class GdjtClient:
         c = f"PG.ASP.Session.ID={self.session_id}"
         if self.weixin_code_id:
             c += f"; PG.ASP.WeiXinCode.ID={self.weixin_code_id}"
+        if self.token:
+            c += f"; token={self.token}"
         return c
 
     def _multipart(self, fields: dict):
@@ -108,6 +113,9 @@ class GdjtClient:
         client_auth = os.environ.get("GDJT_CLIENT_AUTH", "").strip()
         if client_auth:
             headers["Authorization"] = client_auth
+        token = self.token or os.environ.get("GDJT_CLIENT_TOKEN", "").strip()
+        if token:
+            headers["token"] = token
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         if content_type:
             req.add_header("Content-Type", content_type)

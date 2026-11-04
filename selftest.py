@@ -12,7 +12,7 @@ import os
 import sys
 
 import monitor
-from gdjt_client import GdjtClient
+from gdjt_client import GdjtClient, HttpError
 
 
 def main():
@@ -33,13 +33,29 @@ def main():
     print("同济高等讲堂 抢课链路自检")
 
     # 会话
-    d = client.get_lecture_list(page=1, page_size=1, status=0)
+    try:
+        d = client.get_lecture_list(page=1, page_size=1, status=0)
+    except HttpError as e:
+        print(f"  [FAIL] 会话登录态  请求失败: {e}")
+        if e.code >= 500:
+            print("        └ 同济的学员接口对「过期/未登录会话」返回 HTTP 500（空响应），")
+            print("          不是 401。请按 README 第 1 步在手机上重新抓一次 Cookie")
+            print("          （会连同 token 一起更新 config.json）再运行本自检。")
+        print("=" * 56)
+        return 2
+    except Exception as e:
+        print(f"  [FAIL] 会话登录态  网络异常: {e}")
+        print("=" * 56)
+        return 2
     sess_ok = d.get("state") == "success"
     check("会话登录态", sess_ok, "" if sess_ok else str(d.get("msg", d)))
     if not sess_ok:
         print("=" * 56)
         print("会话失效，请按 README 第 1 步重新抓 Cookie 更新 config.json")
         return 2
+
+    tok = ((cfg.get("session") or {}).get("token") or cfg.get("token") or "").strip()
+    print(f"  [INFO] 登录 token: {'已配置（%d 字符）' % len(tok) if tok else '未配置（新版接口可能需要；若所有接口都 500，请重抓一次 Cookie）'}")
 
     # 人脸
     check("人脸采集", client.is_finish_face(), "(报名前置条件)")

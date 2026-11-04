@@ -1,7 +1,8 @@
 {
   "session": {
     "pg_asp_session_id": "填写 PG.ASP.Session.ID（见 README 第1步抓取）",
-    "pg_asp_weixin_code_id": "填写 PG.ASP.WeiXinCode.ID（可为空）"
+    "pg_asp_weixin_code_id": "填写 PG.ASP.WeiXinCode.ID（可为空）",
+    "token": "新版接口需要的 token（抓包自动写入；抓不到可留空）"
   },
   "authorization": "Basic cTN4YXBwbTV0eHc0MmtoejVjYzg1YWY0OmI1dTRteWVrZDVkYno0cGUxcTFoY3dnb3h4eXR0bTM3",
   "poll_interval": 5,

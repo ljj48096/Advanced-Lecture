@@ -184,14 +184,17 @@ mitmdump -s capture_cookie.py -p 8080 --set block_global=false
           文件: D:\...\Advanced-Lecture\config.json
           PG.ASP.Session.ID    = xxxxxxxx-xxxx-...
           PG.ASP.WeiXinCode.ID = yyyyyyyy...
+          token                = abcd…wxyz（已保存，新版接口需要）
           无需手动复制，直接运行 python main.py 即可。
 ============================================================
 ```
 
-`capture_cookie.py` 会把两个 Cookie **自动写进 `config.json` 的 `session` 字段**，不用手动复制粘贴：
+`capture_cookie.py` 会把两个 Cookie（以及新版前端需要、出现在请求头或 `Set-Cookie` 里的 `token`）**自动写进 `config.json` 的 `session` 字段**，不用手动复制粘贴：
 
 - 如果 `config.json` 还不存在，会以 `config.example.json` 为模板**自动创建**，此时提示里会多一行，提醒你补全 `email` 等配置（见第 2 步）；
-- 如果 `config.json` 已存在，只更新 `session` 两个字段，其他配置原样保留；
+- 如果 `config.json` 已存在，只更新 `session` 字段，其他配置原样保留；
+- 同时把站点公开的 `Authorization`（会随前端版本轮换）一起更新，省得手动改；
+- `token` 在终端里只显示首尾几位，完整值只写进本地的 `config.json`（该文件已被 `.gitignore` 排除）；
 - 值没变化不会重复写文件、重复刷提示。
 
 ### 1.7 清理（可选但建议）
@@ -223,7 +226,8 @@ cp config.example.json config.json      # Windows PowerShell: Copy-Item config.e
 {
   "session": {
     "pg_asp_session_id": "第1步抓到的 PG.ASP.Session.ID",
-    "pg_asp_weixin_code_id": "第1步抓到的 PG.ASP.WeiXinCode.ID"
+    "pg_asp_weixin_code_id": "第1步抓到的 PG.ASP.WeiXinCode.ID",
+    "token": "第1步抓包自动写入的 token（新版接口需要；抓不到可留空）"
   },
   "authorization": "Basic ...（固定值，不用改）",
   "poll_interval": 5,              // 轮询间隔（秒）
@@ -293,6 +297,10 @@ python main.py
 ```
 
 如果 Cookie 真的失效（HTTP 401/403，或接口明确返回失败），程序不会空转重试，而是直接提示「登录 Cookie 无效或已过期」并退出——那种情况重试多少次都没用，需要重新抓 Cookie。
+
+**注意：同济对「过期/未登录」会话通常不是回 401，而是回 `HTTP 500`（响应体为空）。** 所以如果 500 一直重试不过（第 3 次起会弹专门提示），基本可以判定是 Cookie 过期了：手机能登录只说明你的微信登录态有效，脚本手里的是另一次抓取的旧会话。按「第 1 步」重抓一次即可，`capture_cookie.py` 现在会连同 `token`、公开的 `Authorization` 一起更新到 `config.json`。
+
+> ASP 会话是**滑动过期**的：程序每几秒轮询一次会一直续命，但停跑约 20 分钟以上就会超时，下次运行前需要重新抓 Cookie。
 
 然后进入常驻监控，终端底部是一个**原地刷新的面板**（不会一行行往下刷）：
 
@@ -414,7 +422,7 @@ python main.py
 | 现象 | 处理 |
 | --- | --- |
 | 启动弹 `!!!` 警告「Cookie 无效/过期/缺失」 | 重新走一遍「第 1 步」抓 Cookie，或先 `python selftest.py` 自检 |
-| 启动时报 `gdjt_client.HttpError: HTTP 500` 或连接超时 | 平台侧故障/网络抖动，程序**不会退出**：打印警告后每 `startup_retry_interval`（默认 60）秒自动重试，恢复后自动进入监控。无需干预；若长时间不过，可同时用手机看平台是否正常 |
+| 启动/运行时报 `HTTP 500`，且**一直**重试不过 | 同济的学员接口对「过期/未登录会话」返回 500（空响应）而不是 401，所以持续 500 多半是 **Cookie 过期**，而不是平台挂了。程序会每 `startup_retry_interval`（默认 60）秒重试，第 3 次起会提示；此时按「第 1 步」在手机上重新抓一次 Cookie（会自动带上 `token` 和新的 `Authorization`），更新 `config.json` 后重启。**停跑约 20 分钟以上 ASP 会话就会超时**，再次运行前都要重抓——手机能登录不代表脚本手里的旧 Cookie 还有效 |
 | 运行中报「会话失效」退出 | 同上，更新 `config.json` 后重启 |
 | 日志里偶尔出现 `本轮异常(继续下一轮): <urlopen error timed out>` | 网络抖动，请求在 10 秒内没连上（`_ssl.c:1112: The handshake operation timed out` 是 TLS 握手超时）。程序已自动**退避重试 2 次**（0.5s、1.0s），仍失败才跳过本轮，下一轮自动恢复，无需干预。若连续失败 5 轮会弹警告横幅——检查网络，或关掉 Clash/梯子的「全局/TUN」模式（程序默认**直连**，不读 `HTTP(S)_PROXY` 环境变量；确需走代理时启动前设 `GDJT_USE_ENV_PROXY=1`） |
 | 邮件发不出去 | 检查 `sender_pwd` 是否为**授权码**（非登录密码）；确认已开启 SMTP |

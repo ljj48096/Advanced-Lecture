@@ -25,7 +25,7 @@ import time
 import unicodedata
 from datetime import datetime
 
-from gdjt_client import GdjtClient, SessionExpired
+from gdjt_client import GdjtClient, HttpError, SessionExpired
 import db
 import mailer
 
@@ -51,6 +51,14 @@ GRAB_MAX_SECONDS = 180
 
 # 启动时会话检查遇到服务端 5xx / 网络异常时的重试间隔（可用 config 的 startup_retry_interval 覆盖）。
 STARTUP_RETRY_SECONDS = 60
+
+def looks_like_stale_session(e):
+    """同济的学员接口对「未登录/会话过期」返回 HTTP 500 空响应，而不是 401/JSON 报错。
+
+    因此持续收到 500 时，最该怀疑的是 Cookie 过期——重试再多也恢复不了。
+    """
+    return isinstance(e, HttpError) and e.code >= 500 and not (e.body or b"").strip()
+
 
 # 日志去重：key -> 上次已提示的消息。同一条消息只打一次，内容变了才再打。
 _noted = {}
@@ -126,9 +134,11 @@ def load_config():
 
 
 def make_client(cfg):
+    session = cfg.get("session") or {}
     return GdjtClient(
-        session_id=cfg["session"]["pg_asp_session_id"],
-        weixin_code_id=cfg["session"].get("pg_asp_weixin_code_id", ""),
+        session_id=session["pg_asp_session_id"],
+        weixin_code_id=session.get("pg_asp_weixin_code_id", ""),
+        token=session.get("token") or cfg.get("token", ""),
     )
 
 
@@ -899,7 +909,14 @@ def main():
                 warn_banner(log, "启动检查失败（服务端 5xx / 网络异常），将自动重试", [
                     f"异常: {e}",
                     f"每隔 {retry_gap:.0f} 秒重试一次，成功后自动继续监控；Ctrl+C 可退出。",
-                    "若是 Cookie 失效，重试时接口会明确报错并提示重新抓取。",
+                    "若连续 500 超过几分钟，多半是登录 Cookie 过期，程序随后会专门提示。",
+                ])
+            elif looks_like_stale_session(e) and (attempt in (3, 10) or attempt % 30 == 0):
+                warn_banner(log, "连续 HTTP 500：登录会话多半已过期", [
+                    "同济的学员接口对过期/未登录会话返回 500（空响应），不是 401，程序无法自动识别。",
+                    "请在手机微信里重新打开「高等讲堂」，按 README 第 1 步抓一次 Cookie",
+                    "（抓包脚本会连同新版接口需要的 token 一起写入 config.json），然后重启本程序。",
+                    "停跑较久（ASP 会话超时）后再运行也需要重新抓，否则会一直 500。",
                 ])
             else:
                 log.warning("启动检查仍失败（第 %d 次）：%s；%.0f 秒后再试",
@@ -940,7 +957,13 @@ def main():
             # 网络抖动（超时/SSL 握手超时）已由客户端自动重试 2 次，走到这里说明仍失败
             fails += 1
             log.error("本轮异常(继续下一轮): %s （连续失败 %d 轮）", e, fails)
-            if fails in (5, 20):
+            if fails in (5, 20) and looks_like_stale_session(e):
+                warn_banner(log, "连续 HTTP 500：登录会话多半已过期", [
+                    "同济的学员接口对过期/未登录会话返回 500（空响应），不是 401，程序无法自动识别。",
+                    "请在手机微信里重新打开「高等讲堂」，按 README 第 1 步抓一次 Cookie",
+                    "（抓包脚本会连同新版接口需要的 token 一起写入 config.json），然后重启本程序。",
+                ])
+            elif fails in (5, 20):
                 warn_banner(log, "连续多轮请求失败，请检查网络", [
                     f"已连续失败 {fails} 轮，最近一次: {e}",
                     "1) 检查本机网络 / 校园网是否正常；",
